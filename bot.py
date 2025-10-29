@@ -1,6 +1,8 @@
 import os
 import logging
 import asyncio
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import Message
@@ -9,21 +11,33 @@ import re
 import tempfile
 from collections import defaultdict
 
-# Настройка логирования
+# HTTP сервер для Render
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+    
+    def log_message(self, format, *args):
+        pass
+
+def run_http_server():
+    server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
+    server.serve_forever()
+
+# Запускаем HTTP сервер
+http_thread = threading.Thread(target=run_http_server, daemon=True)
+http_thread.start()
+
+# Остальной код бота (без изменений)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Токен бота из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
-
-# Хранилище для данных пользователей
 user_data_store = defaultdict(list)
-
-# Инициализация бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Функции парсинга
 def find_table_structure(ws):
     headers_positions = {}
     for row in ws.iter_rows():
@@ -123,7 +137,6 @@ def parse_invoice_file(file_path):
         logger.error(f"Ошибка при обработке файла: {e}")
         return []
 
-# Функции для статистики
 def calculate_statistics(data):
     if not data:
         return None
@@ -172,7 +185,6 @@ def calculate_file_statistics(file_data):
         'trips_count': trips_count
     }
 
-# Обработчики команд
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     welcome_text = """
@@ -224,22 +236,18 @@ async def document_handler(message: Message):
         
         await message.answer(f"🔍 Обрабатываю файл: {document.file_name}")
         
-        # Скачиваем файл
         file = await bot.get_file(document.file_id)
         file_path = f"/tmp/{document.file_name}"
         await bot.download_file(file.file_path, file_path)
         
-        # Парсим файл
         file_data = parse_invoice_file(file_path)
         
         if not file_data:
             await message.answer("❌ Не удалось найти данные в файле. Проверьте формат.")
             return
         
-        # Сохраняем данные
         user_data_store[user_id].extend(file_data)
         
-        # Статистика
         file_stats = calculate_file_statistics(file_data)
         user_data = user_data_store[user_id]
         all_stats = calculate_statistics(user_data)
@@ -314,20 +322,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
-from aiohttp import web
-import threading
-
-# Простой HTTP сервер для Render
-async def health_check(request):
-    return web.Response(text="Bot is alive")
-
-def run_http_server():
-    app = web.Application()
-    app.router.add_get('/health', health_check)
-    web.run_app(app, host='0.0.0.0', port=8080)
-
-# Запускаем HTTP сервер в отдельном потоке
-http_thread = threading.Thread(target=run_http_server, daemon=True)
-http_thread.start()
-
