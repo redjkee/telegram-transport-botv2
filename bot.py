@@ -1,6 +1,63 @@
+import asyncio
+import logging
+import os
+from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
-import asyncio
+import pandas as pd
+import io
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
+# Токен бота из переменных окружения
+API_TOKEN = os.getenv('BOT_TOKEN')
+
+if not API_TOKEN:
+    raise ValueError("Токен бота не найден! Убедитесь, что переменная BOT_TOKEN установлена.")
+
+# Инициализация бота и диспетчера
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher()
+
+# Хранилище данных пользователей
+user_data_store = {}
+
+def calculate_statistics(data):
+    """Расчет статистики из данных"""
+    if not data:
+        return {}
+    
+    total_trips = len(data)
+    unique_files = len(set(item['Файл'] for item in data))
+    unique_cars = len(set(item['Гос_номер'] for item in data))
+    unique_drivers = len(set(item['Водитель'] for item in data if item['Водитель'] != "Фамилия не найдена"))
+    total_amount = sum(item['Стоимость'] for item in data)
+    
+    # Статистика по автомобилям
+    car_stats = {}
+    for item in data:
+        car_plate = item['Гос_номер']
+        if car_plate not in car_stats:
+            car_stats[car_plate] = {
+                'trips_count': 0,
+                'total_amount': 0,
+                'drivers': set(),
+                'files': set()
+            }
+        car_stats[car_plate]['trips_count'] += 1
+        car_stats[car_plate]['total_amount'] += item['Стоимость']
+        car_stats[car_plate]['drivers'].add(item['Водитель'])
+        car_stats[car_plate]['files'].add(item['Файл'])
+    
+    return {
+        'total_trips': total_trips,
+        'unique_files': unique_files,
+        'unique_cars': unique_cars,
+        'unique_drivers': unique_drivers,
+        'total_amount': total_amount,
+        'car_stats': car_stats
+    }
 
 async def generate_report(message: Message, data, title):
     if not data:
@@ -97,6 +154,9 @@ async def start_handler(message: Message):
 /cars - отчет только по автомобилям  
 /drivers - отчет только по водителям
 /clear - очистить все данные
+
+🔍 ПОИСК:
+Отправьте номер автомобиля (например: 302) или фамилию водителя для получения детальной статистики
 
 📁 Поддерживаемые форматы: .xlsx, .xls
 
@@ -221,3 +281,103 @@ async def clear_handler(message: Message):
         await message.answer("✅ Все данные очищены!")
     else:
         await message.answer("📭 Нет данных для очистки.")
+
+@dp.message()
+async def handle_text_message(message: Message):
+    """Обработка текстовых сообщений для поиска по водителям и автомобилям"""
+    user_id = message.from_user.id
+    user_data = user_data_store.get(user_id, [])
+    
+    if not user_data:
+        await message.answer("📭 Нет данных для поиска. Сначала отправьте файлы.")
+        return
+    
+    search_text = message.text.strip()
+    
+    # Если это команда - пропускаем (обрабатывается другими хендлерами)
+    if search_text.startswith('/'):
+        return
+    
+    # Поиск по номеру автомобиля (цифры)
+    if search_text.isdigit():
+        car_results = [item for item in user_data if search_text in item['Гос_номер']]
+        
+        if car_results:
+            car_plates = set(item['Гос_номер'] for item in car_results)
+            total_trips = len(car_results)
+            total_amount = sum(item['Стоимость'] for item in car_results)
+            drivers = set(item['Водитель'] for item in car_results if item['Водитель'] != "Фамилия не найдена")
+            files = set(item['Файл'] for item in car_results)
+            
+            response = f"""
+🔍 РЕЗУЛЬТАТЫ ПОИСКА ПО АВТОМОБИЛЮ: {search_text}
+
+Найдено автомобилей: {len(car_plates)}
+• Номера: {', '.join(car_plates)}
+• Поездок: {total_trips}
+• Водители: {', '.join(drivers) if drivers else 'Не указаны'}
+• Файлов: {len(files)}
+• Общая сумма: {total_amount:,.0f} руб.
+
+Детали поездок:
+"""
+            
+            for i, item in enumerate(car_results[:10], 1):
+                response += f"\n{i}. {item['Дата']} - {item['Водитель']} - {item['Стоимость']:,.0f} руб."
+            
+            if len(car_results) > 10:
+                response += f"\n\n... и еще {len(car_results) - 10} поездок"
+                
+            await message.answer(response)
+        else:
+            await message.answer(f"❌ Автомобиль с номером '{search_text}' не найден")
+    
+    # Поиск по фамилии водителя (текст)
+    else:
+        driver_results = [item for item in user_data if search_text.lower() in item['Водитель'].lower()]
+        
+        if driver_results:
+            drivers_found = set(item['Водитель'] for item in driver_results)
+            total_trips = len(driver_results)
+            total_amount = sum(item['Стоимость'] for item in driver_results)
+            cars = set(item['Гос_номер'] for item in driver_results)
+            files = set(item['Файл'] for item in driver_results)
+            
+            response = f"""
+🔍 РЕЗУЛЬТАТЫ ПОИСКА ПО ВОДИТЕЛЮ: {search_text}
+
+Найдено водителей: {len(drivers_found)}
+• Фамилии: {', '.join(drivers_found)}
+• Поездок: {total_trips}
+• Автомобили: {', '.join(cars)}
+• Файлов: {len(files)}
+• Общая сумма: {total_amount:,.0f} руб.
+
+Детали поездок:
+"""
+            
+            for i, item in enumerate(driver_results[:10], 1):
+                response += f"\n{i}. {item['Дата']} - {item['Гос_номер']} - {item['Стоимость']:,.0f} руб."
+            
+            if len(driver_results) > 10:
+                response += f"\n\n... и еще {len(driver_results) - 10} поездок"
+                
+            await message.answer(response)
+        else:
+            await message.answer(f"❌ Водитель '{search_text}' не найден")
+
+# Добавьте сюда вашу существующую функцию обработки файлов
+@dp.message(lambda message: message.document)
+async def handle_document(message: Message):
+    """Обработка загружаемых файлов"""
+    # Ваша существующая логика обработки Excel файлов
+    user_id = message.from_user.id
+    # ... ваш код обработки файла ...
+    await message.answer("📁 Файл получен! Используйте команды /report, /cars, /drivers для просмотра отчетов.")
+
+async def main():
+    logging.info("Бот запущен")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
