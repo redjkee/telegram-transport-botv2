@@ -23,7 +23,7 @@ user_data_store = defaultdict(list)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Функции парсинга (остаются без изменений)
+# Функции парсинга
 def find_table_structure(ws):
     headers_positions = {}
     for row in ws.iter_rows():
@@ -176,24 +176,24 @@ def calculate_file_statistics(file_data):
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     welcome_text = """
-🚛 *Transport Analytics Bot*
+🚛 Transport Analytics Bot
 
 Отправьте мне Excel файлы с транспортными накладными, и я:
 • Соберу данные из ВСЕХ файлов
 • Покажу суммарную статистику по автомобилям
 • Сгенерирую общий отчет
 
-*Режимы работы:*
+Режимы работы:
 1. Отправьте один файл - получите отчет по нему
 2. Отправьте несколько файлов - получите ОБЩИЙ отчет по всем
 3. /clear - очистить все загруженные файлы
 4. /report - получить отчет по текущим данным
 
-*Поддерживаемые форматы:* .xlsx, .xls
+Поддерживаемые форматы: .xlsx, .xls
 
 Просто отправляйте файлы один за другим!
     """
-    await message.answer(welcome_text, parse_mode='Markdown')
+    await message.answer(welcome_text)
 
 @dp.message(Command("clear"))
 async def clear_handler(message: Message):
@@ -245,13 +245,13 @@ async def document_handler(message: Message):
         all_stats = calculate_statistics(user_data)
         
         response = f"""
-📄 *Файл обработан: {document.file_name}*
+📄 Файл обработан: {document.file_name}
 
-*Данные файла:*
+Данные файла:
 • Поездок в файле: {file_stats['trips_count']}
 • Сумма в файле: {file_stats['total_amount']:,.0f} руб.
 
-*Общая статистика:*
+Общая статистика:
 • Файлов загружено: {all_stats['unique_files']}
 • Всего поездок: {all_stats['total_trips']}
 • Общая сумма: {all_stats['total_amount']:,.0f} руб.
@@ -259,7 +259,7 @@ async def document_handler(message: Message):
 💡 Отправьте еще файлы или используйте /report для получения отчета
         """
         
-        await message.answer(response, parse_mode='Markdown')
+        await message.answer(response)
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
@@ -279,23 +279,23 @@ async def generate_report(message: Message, data, title):
         if len(car_data['files']) > 3:
             files += f" ... (еще {len(car_data['files']) - 3})"
         
-car_reports.append(f"🚗 {car_plate}\n"
-                 f"• Поездок: {car_data['trips_count']}\n"
-                 f"• Водители: {drivers}\n"
-                 f"• Файлы: {files}\n"
-                 f"• Общая сумма: {car_data['total_amount']:,.0f} руб.")
+        car_reports.append(f"🚗 {car_plate}\n"
+                         f"• Поездок: {car_data['trips_count']}\n"
+                         f"• Водители: {drivers}\n"
+                         f"• Файлы: {files}\n"
+                         f"• Общая сумма: {car_data['total_amount']:,.0f} руб.")
     
     response = f"""
-📊 *{title}*
+📊 {title}
 
-*Общая статистика:*
+Общая статистика:
 • Файлов обработано: {stats['unique_files']}
 • Всего поездок: {stats['total_trips']}
 • Автомобилей: {stats['unique_cars']}  
 • Водителей: {stats['unique_drivers']}
 • Общая сумма: {stats['total_amount']:,.0f} руб.
 
-*По автомобилям:*
+По автомобилям:
 {chr(10).join(car_reports)}
 
 ✅ Отчет сформирован!
