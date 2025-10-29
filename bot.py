@@ -1,9 +1,12 @@
 import asyncio
 import logging
 import os
+import aiofiles
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
+import openpyxl
+import io
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
