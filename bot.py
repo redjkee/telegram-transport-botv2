@@ -1,17 +1,16 @@
 import os
 import logging
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.types import Message
 from openpyxl import load_workbook
 import re
 import tempfile
 from collections import defaultdict
 
 # Настройка логирования
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Токен бота из переменных окружения
@@ -19,6 +18,10 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 
 # Хранилище для данных пользователей
 user_data_store = defaultdict(list)
+
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
 # Функции парсинга (остаются без изменений)
 def find_table_structure(ws):
@@ -120,7 +123,7 @@ def parse_invoice_file(file_path):
         logger.error(f"Ошибка при обработке файла: {e}")
         return []
 
-# Функции для статистики БЕЗ PANDAS (остаются без изменений)
+# Функции для статистики
 def calculate_statistics(data):
     if not data:
         return None
@@ -169,7 +172,9 @@ def calculate_file_statistics(file_data):
         'trips_count': trips_count
     }
 
-def start(update, context):
+# Обработчики команд
+@dp.message(Command("start"))
+async def start_handler(message: Message):
     welcome_text = """
 🚛 *Transport Analytics Bot*
 
@@ -188,49 +193,53 @@ def start(update, context):
 
 Просто отправляйте файлы один за другим!
     """
-    update.message.reply_text(welcome_text, parse_mode='Markdown')
+    await message.answer(welcome_text, parse_mode='Markdown')
 
-def clear_data(update, context):
-    user_id = update.message.from_user.id
+@dp.message(Command("clear"))
+async def clear_handler(message: Message):
+    user_id = message.from_user.id
     user_data_store[user_id] = []
-    update.message.reply_text("✅ Все данные очищены! Можно загружать новые файлы.")
+    await message.answer("✅ Все данные очищены! Можно загружать новые файлы.")
 
-def show_report(update, context):
-    user_id = update.message.from_user.id
+@dp.message(Command("report"))
+async def report_handler(message: Message):
+    user_id = message.from_user.id
     user_data = user_data_store[user_id]
     
     if not user_data:
-        update.message.reply_text("📭 Нет данных для отчета. Сначала отправьте файлы.")
+        await message.answer("📭 Нет данных для отчета. Сначала отправьте файлы.")
         return
     
-    generate_report(update, user_data, "ТЕКУЩИЙ ОТЧЕТ")
+    await generate_report(message, user_data, "ТЕКУЩИЙ ОТЧЕТ")
 
-def handle_document(update, context):
+@dp.message(F.document)
+async def document_handler(message: Message):
     try:
-        user_id = update.message.from_user.id
-        
-        document = update.message.document
-        file = context.bot.get_file(document.file_id)
+        user_id = message.from_user.id
+        document = message.document
         
         if not (document.file_name.endswith('.xlsx') or document.file_name.endswith('.xls')):
-            update.message.reply_text("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
+            await message.answer("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
             return
         
-        update.message.reply_text(f"🔍 Обрабатываю файл: {document.file_name}")
+        await message.answer(f"🔍 Обрабатываю файл: {document.file_name}")
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
-            file.download(temp_file.name)
-            
-            file_data = parse_invoice_file(temp_file.name)
-            
-            os.unlink(temp_file.name)
+        # Скачиваем файл
+        file = await bot.get_file(document.file_id)
+        file_path = f"/tmp/{document.file_name}"
+        await bot.download_file(file.file_path, file_path)
+        
+        # Парсим файл
+        file_data = parse_invoice_file(file_path)
         
         if not file_data:
-            update.message.reply_text("❌ Не удалось найти данные в файле. Проверьте формат.")
+            await message.answer("❌ Не удалось найти данные в файле. Проверьте формат.")
             return
         
+        # Сохраняем данные
         user_data_store[user_id].extend(file_data)
         
+        # Статистика
         file_stats = calculate_file_statistics(file_data)
         user_data = user_data_store[user_id]
         all_stats = calculate_statistics(user_data)
@@ -250,15 +259,15 @@ def handle_document(update, context):
 💡 Отправьте еще файлы или используйте /report для получения отчета
         """
         
-        update.message.reply_text(response, parse_mode='Markdown')
+        await message.answer(response, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        update.message.reply_text("❌ Произошла ошибка при обработке файла")
+        await message.answer("❌ Произошла ошибка при обработке файла")
 
-def generate_report(update, data, title):
+async def generate_report(message: Message, data, title):
     if not data:
-        update.message.reply_text("❌ Нет данных для отчета")
+        await message.answer("❌ Нет данных для отчета")
         return
     
     stats = calculate_statistics(data)
@@ -293,43 +302,15 @@ def generate_report(update, data, title):
     """
     
     if len(response) > 4000:
-        parts = []
-        current_part = ""
-        for line in response.split('\n'):
-            if len(current_part + line + '\n') > 4000:
-                parts.append(current_part)
-                current_part = line + '\n'
-            else:
-                current_part += line + '\n'
-        parts.append(current_part)
-        
+        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
         for part in parts:
-            update.message.reply_text(part, parse_mode='Markdown')
+            await message.answer(part, parse_mode='Markdown')
+            await asyncio.sleep(0.5)
     else:
-        update.message.reply_text(response, parse_mode='Markdown')
+        await message.answer(response, parse_mode='Markdown')
 
-def error_handler(update, context):
-    logger.error(f"Ошибка: {context.error}")
-    update.message.reply_text("❌ Произошла ошибка. Попробуйте еще раз.")
-
-def main():
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN не установлен!")
-        return
-    
-    # ПРАВИЛЬНЫЙ СИНТАКСИС ДЛЯ 12.8
-    updater = Updater(BOT_TOKEN, use_context=True)
-    dp = updater.dispatcher
-    
-    dp.add_handler(CommandHandler("start", start, pass_args=True))
-    dp.add_handler(CommandHandler("clear", clear_data, pass_args=True))
-    dp.add_handler(CommandHandler("report", show_report, pass_args=True))
-    dp.add_handler(MessageHandler(Filters.document, handle_document, pass_args=True))
-    dp.add_error_handler(error_handler)
-    
-    logger.info("🤖 Бот запущен...")
-    updater.start_polling()
-    updater.idle()
+async def main():
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
