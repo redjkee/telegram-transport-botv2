@@ -1,5 +1,4 @@
 import os
-import pandas as pd
 import openpyxl
 import re
 from datetime import datetime
@@ -8,7 +7,7 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import logging
 import tempfile
-import json
+from collections import defaultdict
 
 # Настройка логирования
 logging.basicConfig(
@@ -218,18 +217,20 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.unlink(temp_file.name)
         
         # Формируем ответ
-        total_files = len([f for f in user_data_dict[user_id] if f['Источник'] == Path(temp_file.name).name])
+        total_files = len(set(item['Источник'] for item in user_data_dict[user_id]))
         total_trips = len(parsed_data)
         total_amount = sum(item['Стоимость'] for item in parsed_data)
+        unique_cars = len(set(item['Гос_номер'] for item in parsed_data))
+        unique_drivers = len(set(item['Водитель'] for item in parsed_data))
         
         response = (
             f"✅ Файл успешно обработан!\n\n"
             f"📊 Статистика файла:\n"
             f"• Поездок: {total_trips}\n"
             f"• Сумма: {total_amount:,.0f} руб.\n"
-            f"• Уникальных машин: {len(set(item['Гос_номер'] for item in parsed_data))}\n"
-            f"• Уникальных водителей: {len(set(item['Водитель'] for item in parsed_data))}\n\n"
-            f"📁 Всего файлов: {len(set(item['Источник'] for item in user_data_dict[user_id]))}\n"
+            f"• Уникальных машин: {unique_cars}\n"
+            f"• Уникальных водителей: {unique_drivers}\n\n"
+            f"📁 Всего файлов: {total_files}\n"
             f"📈 Всего поездок: {len(user_data_dict[user_id])}\n\n"
             f"Используй /stats для полной статистики или /search для поиска."
         )
@@ -240,6 +241,46 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"Ошибка обработки файла: {e}")
         await update.message.reply_text("❌ Ошибка при обработке файла. Убедитесь, что это корректный Excel-файл с отчетами.")
 
+def calculate_statistics(data):
+    """Рассчитывает статистику без pandas"""
+    if not data:
+        return {}
+    
+    # Общая статистика
+    total_trips = len(data)
+    total_amount = sum(item['Стоимость'] for item in data)
+    
+    # Статистика по автомобилям
+    car_stats = defaultdict(lambda: {'sum': 0, 'count': 0, 'drivers': set()})
+    for item in data:
+        if item['Гос_номер'] != "Неизвестно":
+            car_stats[item['Гос_номер']]['sum'] += item['Стоимость']
+            car_stats[item['Гос_номер']]['count'] += 1
+            car_stats[item['Гос_номер']]['drivers'].add(item['Водитель'])
+    
+    # Статистика по водителям
+    driver_stats = defaultdict(lambda: {'sum': 0, 'count': 0, 'cars': set()})
+    for item in data:
+        if item['Водитель'] != "Фамилия не найдена":
+            driver_stats[item['Водитель']]['sum'] += item['Стоимость']
+            driver_stats[item['Водитель']]['count'] += 1
+            driver_stats[item['Водитель']]['cars'].add(item['Гос_номер'])
+    
+    # Уникальные значения
+    unique_cars = len([car for car in car_stats.keys() if car != "Неизвестно"])
+    unique_drivers = len([driver for driver in driver_stats.keys() if driver != "Фамилия не найдена"])
+    unique_files = len(set(item['Источник'] for item in data))
+    
+    return {
+        'total_trips': total_trips,
+        'total_amount': total_amount,
+        'unique_cars': unique_cars,
+        'unique_drivers': unique_drivers,
+        'unique_files': unique_files,
+        'car_stats': dict(car_stats),
+        'driver_stats': dict(driver_stats)
+    }
+
 async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать общую статистику"""
     user_id = update.message.from_user.id
@@ -248,51 +289,34 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Нет данных для анализа. Сначала отправьте файлы с отчетами.")
         return
     
-    df = pd.DataFrame(user_data_dict[user_id])
+    stats = calculate_statistics(user_data_dict[user_id])
     
-    # Общая статистика
-    total_trips = len(df)
-    total_amount = df['Стоимость'].sum()
-    unique_cars = df['Гос_номер'].nunique()
-    unique_drivers = df['Водитель'].nunique()
-    unique_files = df['Источник'].nunique()
-    
-    # Статистика по автомобилям
-    car_stats = df.groupby('Гос_номер').agg({
-        'Стоимость': ['sum', 'count'],
-        'Водитель': 'nunique'
-    }).round(0)
-    
+    # Формируем текст статистики по автомобилям
     car_stats_text = "🚗 Статистика по автомобилям:\n"
-    for car_plate, stats in car_stats.iterrows():
+    for car_plate, car_data in stats['car_stats'].items():
         if car_plate != "Неизвестно":
-            amount = stats[('Стоимость', 'sum')]
-            count = stats[('Стоимость', 'count')]
-            drivers = stats[('Водитель', 'nunique')]
+            amount = car_data['sum']
+            count = car_data['count']
+            drivers = len(car_data['drivers'])
             car_stats_text += f"• {car_plate}: {count} поездок, {amount:,.0f} руб., {drivers} водит.\n"
     
-    # Статистика по водителям
-    driver_stats = df.groupby('Водитель').agg({
-        'Стоимость': ['sum', 'count'],
-        'Гос_номер': 'nunique'
-    }).round(0)
-    
+    # Формируем текст статистики по водителям
     driver_stats_text = "\n👤 Статистика по водителям:\n"
-    for driver, stats in driver_stats.iterrows():
+    for driver, driver_data in stats['driver_stats'].items():
         if driver != "Фамилия не найдена":
-            amount = stats[('Стоимость', 'sum')]
-            count = stats[('Стоимость', 'count')]
-            cars = stats[('Гос_номер', 'nunique')]
+            amount = driver_data['sum']
+            count = driver_data['count']
+            cars = len(driver_data['cars'])
             driver_stats_text += f"• {driver}: {count} поездок, {amount:,.0f} руб., {cars} машин\n"
     
     response = (
         f"📊 ОБЩАЯ СТАТИСТИКА\n\n"
         f"📈 Основные показатели:\n"
-        f"• Всего поездок: {total_trips}\n"
-        f"• Общая сумма: {total_amount:,.0f} руб.\n"
-        f"• Автомобилей: {unique_cars}\n"
-        f"• Водителей: {unique_drivers}\n"
-        f"• Файлов: {unique_files}\n\n"
+        f"• Всего поездок: {stats['total_trips']}\n"
+        f"• Общая сумма: {stats['total_amount']:,.0f} руб.\n"
+        f"• Автомобилей: {stats['unique_cars']}\n"
+        f"• Водителей: {stats['unique_drivers']}\n"
+        f"• Файлов: {stats['unique_files']}\n\n"
         f"{car_stats_text}"
         f"{driver_stats_text}"
     )
@@ -345,27 +369,27 @@ async def perform_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     search_value = update.message.text
     search_type = context.user_data.get('search_type')
     
-    df = pd.DataFrame(user_data_dict[user_id])
+    data = user_data_dict[user_id]
     
     if search_type == 'car':
-        results = df[df['Гос_номер'] == search_value]
+        results = [item for item in data if item['Гос_номер'] == search_value]
         search_title = f"🚗 Результаты поиска по гос. номеру: {search_value}"
     else:
-        results = df[df['Водитель'].str.contains(search_value, case=False, na=False)]
+        results = [item for item in data if search_value.lower() in item['Водитель'].lower()]
         search_title = f"👤 Результаты поиска по водителю: {search_value}"
     
-    if results.empty:
+    if not results:
         await update.message.reply_text(f"❌ По вашему запросу ничего не найдено.")
         return ConversationHandler.END
     
     total_trips = len(results)
-    total_amount = results['Стоимость'].sum()
-    avg_amount = results['Стоимость'].mean()
+    total_amount = sum(item['Стоимость'] for item in results)
+    avg_amount = total_amount / total_trips if total_trips > 0 else 0
     
     # Детализация поездок
     details_text = "\n📋 Последние поездки:\n"
-    for _, row in results.head(10).iterrows():
-        details_text += f"• {row['Дата']}: {row['Маршрут'][:30]}... - {row['Стоимость']:,.0f} руб.\n"
+    for item in results[:10]:  # Показываем первые 10
+        details_text += f"• {item['Дата']}: {item['Маршрут'][:30]}... - {item['Стоимость']:,.0f} руб.\n"
     
     if len(results) > 10:
         details_text += f"... и еще {len(results) - 10} поездок\n"
