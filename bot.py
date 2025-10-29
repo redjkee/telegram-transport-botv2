@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 # Хранилище для данных пользователей
 user_data_store = defaultdict(list)
 
-# Функции парсинга (БЕЗ PANDAS)
+# Функции парсинга
 def find_table_structure(ws):
     headers_positions = {}
     for row in ws.iter_rows():
@@ -126,16 +126,13 @@ def calculate_statistics(data):
     if not data:
         return None
     
-    # Общая статистика
     total_trips = len(data)
     total_amount = sum(item['Стоимость'] for item in data)
     
-    # Уникальные значения
     unique_cars = set(item['Гос_номер'] for item in data)
     unique_drivers = set(item['Водитель'] for item in data)
     unique_files = set(item['Файл'] for item in data)
     
-    # Статистика по автомобилям
     car_stats = {}
     for item in data:
         car_plate = item['Гос_номер']
@@ -218,38 +215,29 @@ def handle_document(update: Update, context: CallbackContext):
     try:
         user_id = update.effective_user.id
         
-        # Получаем информацию о файле
         document = update.message.document
         file = context.bot.get_file(document.file_id)
         
-        # Проверяем что это Excel файл
         if not (document.file_name.endswith('.xlsx') or document.file_name.endswith('.xls')):
             update.message.reply_text("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
             return
         
         update.message.reply_text(f"🔍 Обрабатываю файл: {document.file_name}")
         
-        # Скачиваем файл во временную папку
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
-            file.download(temp_file.name)
+            file.download(out=temp_file)
             
-            # Парсим файл
             file_data = parse_invoice_file(temp_file.name)
             
-            # Удаляем временный файл
             os.unlink(temp_file.name)
         
         if not file_data:
             update.message.reply_text("❌ Не удалось найти данные в файле. Проверьте формат.")
             return
         
-        # Сохраняем данные пользователя
         user_data_store[user_id].extend(file_data)
         
-        # Статистика по файлу (БЕЗ PANDAS)
         file_stats = calculate_file_statistics(file_data)
-        
-        # Общая статистика пользователя (БЕЗ PANDAS)
         user_data = user_data_store[user_id]
         all_stats = calculate_statistics(user_data)
         
@@ -275,18 +263,17 @@ def handle_document(update: Update, context: CallbackContext):
         update.message.reply_text("❌ Произошла ошибка при обработке файла")
 
 def generate_report(update: Update, data, title):
-    """Генерация отчета (БЕЗ PANDAS)"""
+    """Генерация отчета"""
     if not data:
         update.message.reply_text("❌ Нет данных для отчета")
         return
     
     stats = calculate_statistics(data)
     
-    # Формируем отчет по автомобилям
     car_reports = []
     for car_plate, car_data in stats['car_stats'].items():
         drivers = ', '.join(car_data['drivers'])
-        files = ', '.join(list(car_data['files'])[:3])  # Показываем первые 3 файла
+        files = ', '.join(list(car_data['files'])[:3])
         if len(car_data['files']) > 3:
             files += f" ... (еще {len(car_data['files']) - 3})"
         
@@ -296,7 +283,6 @@ def generate_report(update: Update, data, title):
                          f"• Файлы: {files}\n"
                          f"• Общая сумма: {car_data['total_amount']:,.0f} руб.\n")
     
-    # Формируем ответ
     response = f"""
 📊 *{title}*
 
@@ -313,7 +299,6 @@ def generate_report(update: Update, data, title):
 ✅ Отчет сформирован!
     """
     
-    # Разбиваем длинные сообщения
     if len(response) > 4000:
         parts = []
         current_part = ""
@@ -341,20 +326,15 @@ def main():
         logger.error("❌ BOT_TOKEN не установлен!")
         return
     
-    # Создаем updater
     updater = Updater(token=BOT_TOKEN, use_context=True)
-    
-    # Получаем dispatcher для регистрации обработчиков
     dp = updater.dispatcher
     
-    # Добавляем обработчики
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("clear", clear_data))
     dp.add_handler(CommandHandler("report", show_report))
     dp.add_handler(MessageHandler(Filters.document, handle_document))
     dp.add_error_handler(error_handler)
     
-    # Запускаем бота
     logger.info("🤖 Бот запущен...")
     updater.start_polling()
     updater.idle()
