@@ -1,74 +1,93 @@
 import os
-import logging
-import asyncio
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command
-from aiogram.types import Message
-from openpyxl import load_workbook
+import pandas as pd
+import openpyxl
 import re
+from datetime import datetime
+from pathlib import Path
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+import logging
 import tempfile
-from collections import defaultdict
+import json
 
-# HTTP сервер для Render
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot is alive")
-    
-    def log_message(self, format, *args):
-        pass
-
-def run_http_server():
-    server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
-    server.serve_forever()
-
-# Запускаем HTTP сервер
-http_thread = threading.Thread(target=run_http_server, daemon=True)
-http_thread.start()
-
-# Остальной код бота
-logging.basicConfig(level=logging.INFO)
+# Настройка логирования
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv('BOT_TOKEN')
-user_data_store = defaultdict(list)
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+# Состояния для ConversationHandler
+SELECT_TYPE, INPUT_VALUE = range(2)
+
+# Глобальная переменная для хранения данных
+user_data_dict = {}
+
+def get_current_month():
+    """Возвращает текущий месяц на русском"""
+    month_names = {
+        '01': 'январь', '02': 'февраль', '03': 'март', '04': 'апрель',
+        '05': 'май', '06': 'июнь', '07': 'июль', '08': 'август',
+        '09': 'сентябрь', '10': 'октябрь', '11': 'ноябрь', '12': 'декабрь'
+    }
+    current_month = datetime.now().month
+    return month_names.get(str(current_month).zfill(2))
 
 def find_table_structure(ws):
+    """Находит структуру таблицы по ключевым заголовкам"""
     headers_positions = {}
+    
     for row in ws.iter_rows():
         for cell in row:
             if cell.value:
                 cell_value = str(cell.value).strip()
+                
                 if "Товары (работы, услуги)" in cell_value:
                     headers_positions['description'] = (cell.row, cell.column)
                 elif "Сумма" in cell_value and cell_value != "Сумма с НДС":
                     headers_positions['amount'] = (cell.row, cell.column)
+                elif "№" == cell_value and cell.column < 10:
+                    headers_positions['number'] = (cell.row, cell.column)
+                elif "Кол-во" in cell_value:
+                    headers_positions['quantity'] = (cell.row, cell.column)
+                elif "Ед." in cell_value:
+                    headers_positions['unit'] = (cell.row, cell.column)
+                elif "Цена" in cell_value:
+                    headers_positions['price'] = (cell.row, cell.column)
+    
     return headers_positions
 
 def extract_data_from_description(description):
+    """Извлекает дату, маршрут, гос. номер и фамилию водителя из описания"""
     description_str = str(description)
+    
+    # Маршрут (все до первой запятой)
     route = description_str.split(',')[0].strip()
+    
+    # Дата из текста (формат "от 06.09.25")
     date_match = re.search(r'от\s+(\d{2}\.\d{2}\.\d{2})', description_str)
     date_str = date_match.group(1) if date_match else "Дата не найдена"
+    
+    # Гос. номер - ищем 3 цифры подряд
     plate_match = re.search(r'(\d{3})', description_str)
     car_plate = plate_match.group(1) if plate_match else "Неизвестно"
+    
+    # Фамилия водителя
     driver_match = re.search(r',\s*([А-Я][а-я]+)\s+[А-Я]\.[А-Я]\.', description_str)
     if driver_match:
         driver_name = driver_match.group(1)
     else:
         alt_driver_match = re.search(r',\s*([А-Я][а-я]+)', description_str)
         driver_name = alt_driver_match.group(1) if alt_driver_match else "Фамилия не найдена"
+    
     return route, date_str, car_plate, driver_name
 
 def parse_invoice_file(file_path):
+    """Парсит один файл счета и возвращает данные"""
     try:
-        wb = load_workbook(file_path, data_only=True)
+        wb = openpyxl.load_workbook(file_path, data_only=True)
         ws = wb.active
+        
         headers = find_table_structure(ws)
         
         if not headers.get('description') or not headers.get('amount'):
@@ -80,6 +99,7 @@ def parse_invoice_file(file_path):
         
         parsed_data = []
         row_num = header_row + 1
+        processed_count = 0
         current_empty_rows = 0
         max_empty_rows = 5
         
@@ -120,8 +140,9 @@ def parse_invoice_file(file_path):
                             'Стоимость': amount_value,
                             'Гос_номер': car_plate,
                             'Водитель': driver_name,
-                            'Файл': os.path.basename(file_path)
+                            'Источник': file_path.name
                         })
+                        processed_count += 1
                     
                 except (ValueError, TypeError):
                     pass
@@ -137,402 +158,289 @@ def parse_invoice_file(file_path):
         logger.error(f"Ошибка при обработке файла: {e}")
         return []
 
-def calculate_statistics(data):
-    if not data:
-        return None
-    
-    total_trips = len(data)
-    total_amount = sum(item['Стоимость'] for item in data)
-    
-    unique_cars = set(item['Гос_номер'] for item in data)
-    unique_drivers = set(item['Водитель'] for item in data)
-    unique_files = set(item['Файл'] for item in data)
-    
-    car_stats = {}
-    for item in data:
-        car_plate = item['Гос_номер']
-        if car_plate not in car_stats:
-            car_stats[car_plate] = {
-                'total_amount': 0,
-                'trips_count': 0,
-                'drivers': set(),
-                'files': set()
-            }
-        
-        car_stats[car_plate]['total_amount'] += item['Стоимость']
-        car_stats[car_plate]['trips_count'] += 1
-        car_stats[car_plate]['drivers'].add(item['Водитель'])
-        car_stats[car_plate]['files'].add(item['Файл'])
-    
-    # Статистика по водителям
-    driver_stats = {}
-    for item in data:
-        driver = item['Водитель']
-        if driver not in driver_stats:
-            driver_stats[driver] = {
-                'total_amount': 0,
-                'trips_count': 0,
-                'cars': set(),
-                'files': set()
-            }
-        driver_stats[driver]['total_amount'] += item['Стоимость']
-        driver_stats[driver]['trips_count'] += 1
-        driver_stats[driver]['cars'].add(item['Гос_номер'])
-        driver_stats[driver]['files'].add(item['Файл'])
-    
-    return {
-        'total_trips': total_trips,
-        'total_amount': total_amount,
-        'unique_cars': len(unique_cars),
-        'unique_drivers': len(unique_drivers),
-        'unique_files': len(unique_files),
-        'car_stats': car_stats,
-        'driver_stats': driver_stats
-    }
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /start"""
+    user = update.message.from_user
+    welcome_text = (
+        f"Привет, {user.first_name}! 🚛\n\n"
+        "Я бот для анализа транспортных отчетов.\n\n"
+        "📊 Что я умею:\n"
+        "• Анализировать Excel-файлы с поездками\n"
+        "• Показывать общую статистику\n"
+        "• Искать данные по гос. номеру или водителю\n\n"
+        "📎 Просто отправь мне файл Excel с отчетом!\n\n"
+        "Команды:\n"
+        "/stats - общая статистика\n"
+        "/search - поиск по номеру или водителю\n"
+        "/clear - очистить данные\n"
+        "/help - справка"
+    )
+    await update.message.reply_text(welcome_text)
 
-def calculate_file_statistics(file_data):
-    if not file_data:
-        return None
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help"""
+    help_text = (
+        "📋 Как пользоваться ботом:\n\n"
+        "1. 📎 Отправь Excel-файл с отчетом о поездках\n"
+        "2. 📊 Используй /stats для просмотра статистики\n"
+        "3. 🔍 Используй /search для поиска по:\n"
+        "   • Гос. номеру (например, 123)\n"
+        "   • Фамилии водителя\n"
+        "4. 🗑️ /clear - очистить все данные\n\n"
+        "Формат файлов: стандартные Excel-файлы с маршрутами, суммами, гос. номерами и водителями."
+    )
+    await update.message.reply_text(help_text)
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик загрузки документов"""
+    user_id = update.message.from_user.id
     
-    total_amount = sum(item['Стоимость'] for item in file_data)
-    trips_count = len(file_data)
-    
-    return {
-        'total_amount': total_amount,
-        'trips_count': trips_count
-    }
-
-@dp.message(Command("start"))
-async def start_handler(message: Message):
-    welcome_text = """
-🚛 Transport Analytics Bot
-
-Отправьте мне Excel файлы с транспортными накладными, и я:
-• Соберу данные из ВСЕХ файлов
-• Покажу суммарную статистику по автомобилям и водителям
-• Сгенерирую общий отчет
-
-📊 ДОСТУПНЫЕ КОМАНДЫ:
-
-/report - полный отчет (авто + водители)
-/cars - отчет только по автомобилям  
-/drivers - отчет только по водителям
-/clear - очистить все данные
-
-🔍 ПОИСК:
-Отправьте номер автомобиля (например: 302) или фамилию водителя для получения детальной статистики
-
-📁 Поддерживаемые форматы: .xlsx, .xls
-
-💡 Просто отправляйте файлы один за другим, а затем используйте команды для получения отчетов!
-    """
-    await message.answer(welcome_text)
-
-@dp.message(Command("clear"))
-async def clear_handler(message: Message):
-    user_id = message.from_user.id
-    user_data_store[user_id] = []
-    await message.answer("✅ Все данные очищены! Можно загружать новые файлы.")
-
-@dp.message(Command("report"))
-async def report_handler(message: Message):
-    user_id = message.from_user.id
-    user_data = user_data_store[user_id]
-    
-    if not user_data:
-        await message.answer("📭 Нет данных для отчета. Сначала отправьте файлы.")
-        return
-    
-    await generate_report(message, user_data, "ПОЛНЫЙ ОТЧЕТ")
-
-@dp.message(Command("cars"))
-async def cars_handler(message: Message):
-    """Отчет только по автомобилям"""
-    user_id = message.from_user.id
-    user_data = user_data_store[user_id]
-    
-    if not user_data:
-        await message.answer("📭 Нет данных для отчета. Сначала отправьте файлы.")
-        return
-    
-    stats = calculate_statistics(user_data)
-    
-    car_reports = []
-    for car_plate, car_data in stats['car_stats'].items():
-        drivers = ', '.join(car_data['drivers'])
-        files = ', '.join(list(car_data['files'])[:3])
-        if len(car_data['files']) > 3:
-            files += f" ... (еще {len(car_data['files']) - 3})"
-        
-        car_reports.append(f"🚗 {car_plate}\n"
-                         f"• Поездок: {car_data['trips_count']}\n"
-                         f"• Водители: {drivers}\n"
-                         f"• Файлы: {files}\n"
-                         f"• Общая сумма: {car_data['total_amount']:,.0f} руб.\n")
-    
-    response = f"""
-📊 ОТЧЕТ ПО АВТОМОБИЛЯМ
-
-Всего автомобилей: {stats['unique_cars']}
-Общая сумма: {stats['total_amount']:,.0f} руб.
-
-{chr(10).join(car_reports)}
-    """
-    
-    if len(response) > 4000:
-        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
-        for part in parts:
-            await message.answer(part)
-            await asyncio.sleep(0.5)
-    else:
-        await message.answer(response)
-
-@dp.message(Command("drivers"))
-async def drivers_handler(message: Message):
-    """Отчет только по водителям"""
-    user_id = message.from_user.id
-    user_data = user_data_store[user_id]
-    
-    if not user_data:
-        await message.answer("📭 Нет данных для отчета. Сначала отправьте файлы.")
-        return
-    
-    stats = calculate_statistics(user_data)
-    
-    driver_reports = []
-    for driver, driver_data in stats['driver_stats'].items():
-        if driver == "Фамилия не найдена":
-            continue
-        cars = ', '.join(driver_data['cars'])
-        files = ', '.join(list(driver_data['files'])[:3])
-        if len(driver_data['files']) > 3:
-            files += f" ... (еще {len(driver_data['files']) - 3})"
-        
-        driver_reports.append(f"👤 {driver}\n"
-                            f"• Поездок: {driver_data['trips_count']}\n"
-                            f"• Автомобили: {cars}\n"
-                            f"• Файлы: {files}\n"
-                            f"• Общая сумма: {driver_data['total_amount']:,.0f} руб.\n")
-    
-    response = f"""
-📊 ОТЧЕТ ПО ВОДИТЕЛЯМ
-
-Всего водителей: {len([d for d in stats['driver_stats'].keys() if d != "Фамилия не найдена"])}
-Общая сумма: {stats['total_amount']:,.0f} руб.
-
-{chr(10).join(driver_reports)}
-    """
-    
-    if len(response) > 4000:
-        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
-        for part in parts:
-            await message.answer(part)
-            await asyncio.sleep(0.5)
-    else:
-        await message.answer(response)
-
-@dp.message(F.document)
-async def document_handler(message: Message):
     try:
-        user_id = message.from_user.id
-        document = message.document
+        # Создаем папку для пользователя, если её нет
+        if user_id not in user_data_dict:
+            user_data_dict[user_id] = []
         
-        if not (document.file_name.endswith('.xlsx') or document.file_name.endswith('.xls')):
-            await message.answer("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
-            return
+        # Скачиваем файл
+        document = update.message.document
+        file = await context.bot.get_file(document.file_id)
         
-        await message.answer(f"🔍 Обрабатываю файл: {document.file_name}")
+        # Создаем временный файл
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
+            await file.download_to_drive(temp_file.name)
+            
+            # Парсим файл
+            parsed_data = parse_invoice_file(Path(temp_file.name))
+            
+            # Добавляем данные пользователю
+            user_data_dict[user_id].extend(parsed_data)
+            
+            # Удаляем временный файл
+            os.unlink(temp_file.name)
         
-        file = await bot.get_file(document.file_id)
-        file_path = f"/tmp/{document.file_name}"
-        await bot.download_file(file.file_path, file_path)
+        # Формируем ответ
+        total_files = len([f for f in user_data_dict[user_id] if f['Источник'] == Path(temp_file.name).name])
+        total_trips = len(parsed_data)
+        total_amount = sum(item['Стоимость'] for item in parsed_data)
         
-        file_data = parse_invoice_file(file_path)
+        response = (
+            f"✅ Файл успешно обработан!\n\n"
+            f"📊 Статистика файла:\n"
+            f"• Поездок: {total_trips}\n"
+            f"• Сумма: {total_amount:,.0f} руб.\n"
+            f"• Уникальных машин: {len(set(item['Гос_номер'] for item in parsed_data))}\n"
+            f"• Уникальных водителей: {len(set(item['Водитель'] for item in parsed_data))}\n\n"
+            f"📁 Всего файлов: {len(set(item['Источник'] for item in user_data_dict[user_id]))}\n"
+            f"📈 Всего поездок: {len(user_data_dict[user_id])}\n\n"
+            f"Используй /stats для полной статистики или /search для поиска."
+        )
         
-        if not file_data:
-            await message.answer("❌ Не удалось найти данные в файле. Проверьте формат.")
-            return
-        
-        user_data_store[user_id].extend(file_data)
-        
-        file_stats = calculate_file_statistics(file_data)
-        user_data = user_data_store[user_id]
-        all_stats = calculate_statistics(user_data)
-        
-        response = f"""
-📄 Файл обработан: {document.file_name}
-
-Данные файла:
-• Поездок в файле: {file_stats['trips_count']}
-• Сумма в файле: {file_stats['total_amount']:,.0f} руб.
-
-Общая статистика:
-• Файлов загружено: {all_stats['unique_files']}
-• Всего поездок: {all_stats['total_trips']}
-• Автомобилей: {all_stats['unique_cars']}
-• Водителей: {all_stats['unique_drivers']}
-• Общая сумма: {all_stats['total_amount']:,.0f} руб.
-
-💡 Используйте команды:
-/report - полный отчет
-/cars - по автомобилям  
-/drivers - по водителям
-        """
-        
-        await message.answer(response)
+        await update.message.reply_text(response)
         
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await message.answer("❌ Произошла ошибка при обработке файла")
+        logger.error(f"Ошибка обработки файла: {e}")
+        await update.message.reply_text("❌ Ошибка при обработке файла. Убедитесь, что это корректный Excel-файл с отчетами.")
 
-async def generate_report(message: Message, data, title):
-    if not data:
-        await message.answer("❌ Нет данных для отчета")
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать общую статистику"""
+    user_id = update.message.from_user.id
+    
+    if user_id not in user_data_dict or not user_data_dict[user_id]:
+        await update.message.reply_text("📭 Нет данных для анализа. Сначала отправьте файлы с отчетами.")
         return
     
-    stats = calculate_statistics(data)
+    df = pd.DataFrame(user_data_dict[user_id])
     
-    car_reports = []
-    for car_plate, car_data in stats['car_stats'].items():
-        drivers = ', '.join(car_data['drivers'])
-        files = ', '.join(list(car_data['files'])[:3])
-        if len(car_data['files']) > 3:
-            files += f" ... (еще {len(car_data['files']) - 3})"
-        
-        car_reports.append(f"🚗 {car_plate}\n"
-                         f"• Поездок: {car_data['trips_count']}\n"
-                         f"• Водители: {drivers}\n"
-                         f"• Файлы: {files}\n"
-                         f"• Общая сумма: {car_data['total_amount']:,.0f} руб.")
+    # Общая статистика
+    total_trips = len(df)
+    total_amount = df['Стоимость'].sum()
+    unique_cars = df['Гос_номер'].nunique()
+    unique_drivers = df['Водитель'].nunique()
+    unique_files = df['Источник'].nunique()
     
-    driver_reports = []
-    for driver, driver_data in stats['driver_stats'].items():
-        if driver == "Фамилия не найдена":
-            continue
-        cars = ', '.join(driver_data['cars'])
-        files = ', '.join(list(driver_data['files'])[:3])
-        if len(driver_data['files']) > 3:
-            files += f" ... (еще {len(driver_data['files']) - 3})"
-        
-        driver_reports.append(f"👤 {driver}\n"
-                            f"• Поездок: {driver_data['trips_count']}\n"
-                            f"• Автомобили: {cars}\n"
-                            f"• Файлы: {files}\n"
-                            f"• Общая сумма: {driver_data['total_amount']:,.0f} руб.")
+    # Статистика по автомобилям
+    car_stats = df.groupby('Гос_номер').agg({
+        'Стоимость': ['sum', 'count'],
+        'Водитель': 'nunique'
+    }).round(0)
     
-    response = f"""
-📊 {title}
-
-Общая статистика:
-• Файлов обработано: {stats['unique_files']}
-• Всего поездок: {stats['total_trips']}
-• Автомобилей: {stats['unique_cars']}  
-• Водителей: {stats['unique_drivers']}
-• Общая сумма: {stats['total_amount']:,.0f} руб.
-
-По автомобилям:
-{chr(10).join(car_reports)}
-
-По водителям:
-{chr(10).join(driver_reports)}
-
-✅ Отчет сформирован!
-    """
+    car_stats_text = "🚗 Статистика по автомобилям:\n"
+    for car_plate, stats in car_stats.iterrows():
+        if car_plate != "Неизвестно":
+            amount = stats[('Стоимость', 'sum')]
+            count = stats[('Стоимость', 'count')]
+            drivers = stats[('Водитель', 'nunique')]
+            car_stats_text += f"• {car_plate}: {count} поездок, {amount:,.0f} руб., {drivers} водит.\n"
     
-    if len(response) > 4000:
-        parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
-        for part in parts:
-            await message.answer(part)
-            await asyncio.sleep(0.5)
+    # Статистика по водителям
+    driver_stats = df.groupby('Водитель').agg({
+        'Стоимость': ['sum', 'count'],
+        'Гос_номер': 'nunique'
+    }).round(0)
+    
+    driver_stats_text = "\n👤 Статистика по водителям:\n"
+    for driver, stats in driver_stats.iterrows():
+        if driver != "Фамилия не найдена":
+            amount = stats[('Стоимость', 'sum')]
+            count = stats[('Стоимость', 'count')]
+            cars = stats[('Гос_номер', 'nunique')]
+            driver_stats_text += f"• {driver}: {count} поездок, {amount:,.0f} руб., {cars} машин\n"
+    
+    response = (
+        f"📊 ОБЩАЯ СТАТИСТИКА\n\n"
+        f"📈 Основные показатели:\n"
+        f"• Всего поездок: {total_trips}\n"
+        f"• Общая сумма: {total_amount:,.0f} руб.\n"
+        f"• Автомобилей: {unique_cars}\n"
+        f"• Водителей: {unique_drivers}\n"
+        f"• Файлов: {unique_files}\n\n"
+        f"{car_stats_text}"
+        f"{driver_stats_text}"
+    )
+    
+    await update.message.reply_text(response)
+
+async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало поиска"""
+    user_id = update.message.from_user.id
+    
+    if user_id not in user_data_dict or not user_data_dict[user_id]:
+        await update.message.reply_text("📭 Нет данных для поиска. Сначала отправьте файлы с отчетами.")
+        return ConversationHandler.END
+    
+    keyboard = [['🚗 По гос. номеру', '👤 По водителю']]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+    
+    await update.message.reply_text(
+        "🔍 Выберите тип поиска:",
+        reply_markup=reply_markup
+    )
+    
+    return SELECT_TYPE
+
+async def select_search_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка выбора типа поиска"""
+    search_type = update.message.text
+    
+    if search_type == '🚗 По гос. номеру':
+        context.user_data['search_type'] = 'car'
+        await update.message.reply_text(
+            "Введите гос. номер (только цифры, например: 123):",
+            reply_markup=None
+        )
+    elif search_type == '👤 По водителю':
+        context.user_data['search_type'] = 'driver'
+        await update.message.reply_text(
+            "Введите фамилию водителя:",
+            reply_markup=None
+        )
     else:
-        await message.answer(response)
+        await update.message.reply_text("Пожалуйста, выберите тип поиска из предложенных вариантов.")
+        return SELECT_TYPE
+    
+    return INPUT_VALUE
 
-@dp.message()
-async def handle_text_message(message: Message):
-    """Обработка текстовых сообщений для поиска по водителям и автомобилям"""
-    user_id = message.from_user.id
-    user_data = user_data_store[user_id]
+async def perform_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выполнение поиска"""
+    user_id = update.message.from_user.id
+    search_value = update.message.text
+    search_type = context.user_data.get('search_type')
     
-    if not user_data:
-        await message.answer("📭 Нет данных для поиска. Сначала отправьте файлы.")
-        return
+    df = pd.DataFrame(user_data_dict[user_id])
     
-    search_text = message.text.strip()
-    
-    # Если это команда - пропускаем (обрабатывается другими хендлерами)
-    if search_text.startswith('/'):
-        return
-    
-    # Поиск по номеру автомобиля (цифры)
-    if search_text.isdigit():
-        car_results = [item for item in user_data if search_text in item['Гос_номер']]
-        
-        if car_results:
-            car_plates = set(item['Гос_номер'] for item in car_results)
-            total_trips = len(car_results)
-            total_amount = sum(item['Стоимость'] for item in car_results)
-            drivers = set(item['Водитель'] for item in car_results if item['Водитель'] != "Фамилия не найдена")
-            files = set(item['Файл'] for item in car_results)
-            
-            response = f"""
-🔍 РЕЗУЛЬТАТЫ ПОИСКА ПО АВТОМОБИЛЮ: {search_text}
-
-Найдено автомобилей: {len(car_plates)}
-• Номера: {', '.join(car_plates)}
-• Поездок: {total_trips}
-• Водители: {', '.join(drivers) if drivers else 'Не указаны'}
-• Файлов: {len(files)}
-• Общая сумма: {total_amount:,.0f} руб.
-
-Детали поездок:
-"""
-            
-            for i, item in enumerate(car_results[:10], 1):
-                response += f"\n{i}. {item['Дата']} - {item['Водитель']} - {item['Стоимость']:,.0f} руб. ({item['Маршрут']})"
-            
-            if len(car_results) > 10:
-                response += f"\n\n... и еще {len(car_results) - 10} поездок"
-                
-            await message.answer(response)
-        else:
-            await message.answer(f"❌ Автомобиль с номером '{search_text}' не найден")
-    
-    # Поиск по фамилии водителя (текст)
+    if search_type == 'car':
+        results = df[df['Гос_номер'] == search_value]
+        search_title = f"🚗 Результаты поиска по гос. номеру: {search_value}"
     else:
-        driver_results = [item for item in user_data if search_text.lower() in item['Водитель'].lower()]
-        
-        if driver_results:
-            drivers_found = set(item['Водитель'] for item in driver_results)
-            total_trips = len(driver_results)
-            total_amount = sum(item['Стоимость'] for item in driver_results)
-            cars = set(item['Гос_номер'] for item in driver_results)
-            files = set(item['Файл'] for item in driver_results)
-            
-            response = f"""
-🔍 РЕЗУЛЬТАТЫ ПОИСКА ПО ВОДИТЕЛЮ: {search_text}
+        results = df[df['Водитель'].str.contains(search_value, case=False, na=False)]
+        search_title = f"👤 Результаты поиска по водителю: {search_value}"
+    
+    if results.empty:
+        await update.message.reply_text(f"❌ По вашему запросу ничего не найдено.")
+        return ConversationHandler.END
+    
+    total_trips = len(results)
+    total_amount = results['Стоимость'].sum()
+    avg_amount = results['Стоимость'].mean()
+    
+    # Детализация поездок
+    details_text = "\n📋 Последние поездки:\n"
+    for _, row in results.head(10).iterrows():
+        details_text += f"• {row['Дата']}: {row['Маршрут'][:30]}... - {row['Стоимость']:,.0f} руб.\n"
+    
+    if len(results) > 10:
+        details_text += f"... и еще {len(results) - 10} поездок\n"
+    
+    response = (
+        f"{search_title}\n\n"
+        f"📊 Статистика:\n"
+        f"• Количество поездок: {total_trips}\n"
+        f"• Общая сумма: {total_amount:,.0f} руб.\n"
+        f"• Средняя стоимость: {avg_amount:,.0f} руб.\n"
+        f"{details_text}"
+    )
+    
+    await update.message.reply_text(response)
+    return ConversationHandler.END
 
-Найдено водителей: {len(drivers_found)}
-• Фамилии: {', '.join(drivers_found)}
-• Поездок: {total_trips}
-• Автомобили: {', '.join(cars)}
-• Файлов: {len(files)}
-• Общая сумма: {total_amount:,.0f} руб.
+async def cancel_search(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отмена поиска"""
+    await update.message.reply_text("Поиск отменен.")
+    return ConversationHandler.END
 
-Детали поездок:
-"""
-            
-            for i, item in enumerate(driver_results[:10], 1):
-                response += f"\n{i}. {item['Дата']} - {item['Гос_номер']} - {item['Стоимость']:,.0f} руб. ({item['Маршрут']})"
-            
-            if len(driver_results) > 10:
-                response += f"\n\n... и еще {len(driver_results) - 10} поездок"
-                
-            await message.answer(response)
-        else:
-            await message.answer(f"❌ Водитель '{search_text}' не найден")
+async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очистка всех данных пользователя"""
+    user_id = update.message.from_user.id
+    
+    if user_id in user_data_dict:
+        user_data_dict[user_id] = []
+        await update.message.reply_text("✅ Все данные очищены.")
+    else:
+        await update.message.reply_text("📭 Нет данных для очистки.")
 
-async def main():
-    await dp.start_polling(bot)
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик ошибок"""
+    logger.error(f"Ошибка: {context.error}")
+    if update and update.message:
+        await update.message.reply_text("❌ Произошла ошибка. Попробуйте еще раз.")
+
+def main():
+    """Запуск бота"""
+    # Получаем токен из переменных окружения Render
+    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    
+    if not TOKEN:
+        logger.error("Токен бота не найден в переменных окружения!")
+        return
+    
+    # Создаем приложение
+    application = Application.builder().token(TOKEN).build()
+    
+    # Обработчики команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("stats", show_stats))
+    application.add_handler(CommandHandler("clear", clear_data))
+    
+    # Обработчик документов
+    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    
+    # ConversationHandler для поиска
+    search_conv = ConversationHandler(
+        entry_points=[CommandHandler("search", search_start)],
+        states={
+            SELECT_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_search_type)],
+            INPUT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, perform_search)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_search)]
+    )
+    application.add_handler(search_conv)
+    
+    # Обработчик ошибок
+    application.add_error_handler(error_handler)
+    
+    # Запуск бота
+    print("Бот запущен...")
+    application.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
