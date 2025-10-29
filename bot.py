@@ -1,11 +1,10 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from openpyxl import load_workbook
 import re
 import tempfile
-import asyncio
 from collections import defaultdict
 
 # Настройка логирования
@@ -175,7 +174,7 @@ def calculate_file_statistics(file_data):
         'trips_count': trips_count
     }
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def start(update: Update, context: CallbackContext):
     """Обработчик команды /start"""
     welcome_text = """
 🚛 *Transport Analytics Bot*
@@ -195,44 +194,44 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 Просто отправляйте файлы один за другим!
     """
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+    update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def clear_data(update: Update, context: CallbackContext):
     """Очистка данных пользователя"""
     user_id = update.effective_user.id
     user_data_store[user_id] = []
-    await update.message.reply_text("✅ Все данные очищены! Можно загружать новые файлы.")
+    update.message.reply_text("✅ Все данные очищены! Можно загружать новые файлы.")
 
-async def show_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def show_report(update: Update, context: CallbackContext):
     """Показать отчет по текущим данным"""
     user_id = update.effective_user.id
     user_data = user_data_store[user_id]
     
     if not user_data:
-        await update.message.reply_text("📭 Нет данных для отчета. Сначала отправьте файлы.")
+        update.message.reply_text("📭 Нет данных для отчета. Сначала отправьте файлы.")
         return
     
-    await generate_report(update, user_data, "ТЕКУЩИЙ ОТЧЕТ")
+    generate_report(update, user_data, "ТЕКУЩИЙ ОТЧЕТ")
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def handle_document(update: Update, context: CallbackContext):
     """Обработчик загруженных файлов"""
     try:
         user_id = update.effective_user.id
         
         # Получаем информацию о файле
         document = update.message.document
-        file = await context.bot.get_file(document.file_id)
+        file = context.bot.get_file(document.file_id)
         
         # Проверяем что это Excel файл
         if not (document.file_name.endswith('.xlsx') or document.file_name.endswith('.xls')):
-            await update.message.reply_text("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
+            update.message.reply_text("❌ Пожалуйста, отправьте Excel файл (.xlsx или .xls)")
             return
         
-        await update.message.reply_text(f"🔍 Обрабатываю файл: {document.file_name}")
+        update.message.reply_text(f"🔍 Обрабатываю файл: {document.file_name}")
         
         # Скачиваем файл во временную папку
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
-            await file.download_to_drive(temp_file.name)
+            file.download(temp_file.name)
             
             # Парсим файл
             file_data = parse_invoice_file(temp_file.name)
@@ -241,7 +240,7 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             os.unlink(temp_file.name)
         
         if not file_data:
-            await update.message.reply_text("❌ Не удалось найти данные в файле. Проверьте формат.")
+            update.message.reply_text("❌ Не удалось найти данные в файле. Проверьте формат.")
             return
         
         # Сохраняем данные пользователя
@@ -269,16 +268,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 💡 Отправьте еще файлы или используйте /report для получения отчета
         """
         
-        await update.message.reply_text(response, parse_mode='Markdown')
+        update.message.reply_text(response, parse_mode='Markdown')
         
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        await update.message.reply_text("❌ Произошла ошибка при обработке файла")
+        update.message.reply_text("❌ Произошла ошибка при обработке файла")
 
-async def generate_report(update: Update, data, title):
+def generate_report(update: Update, data, title):
     """Генерация отчета (БЕЗ PANDAS)"""
     if not data:
-        await update.message.reply_text("❌ Нет данных для отчета")
+        update.message.reply_text("❌ Нет данных для отчета")
         return
     
     stats = calculate_statistics(data)
@@ -327,15 +326,14 @@ async def generate_report(update: Update, data, title):
         parts.append(current_part)
         
         for part in parts:
-            await update.message.reply_text(part, parse_mode='Markdown')
-            await asyncio.sleep(0.5)
+            update.message.reply_text(part, parse_mode='Markdown')
     else:
-        await update.message.reply_text(response, parse_mode='Markdown')
+        update.message.reply_text(response, parse_mode='Markdown')
 
-async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+def error_handler(update: Update, context: CallbackContext):
     """Обработчик ошибок"""
     logger.error(f"Ошибка: {context.error}")
-    await update.message.reply_text("❌ Произошла ошибка. Попробуйте еще раз.")
+    update.message.reply_text("❌ Произошла ошибка. Попробуйте еще раз.")
 
 def main():
     """Запуск бота"""
@@ -343,19 +341,23 @@ def main():
         logger.error("❌ BOT_TOKEN не установлен!")
         return
     
-    # Создаем приложение
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Создаем updater
+    updater = Updater(token=BOT_TOKEN, use_context=True)
+    
+    # Получаем dispatcher для регистрации обработчиков
+    dp = updater.dispatcher
     
     # Добавляем обработчики
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("clear", clear_data))
-    application.add_handler(CommandHandler("report", show_report))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    application.add_error_handler(error_handler)
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("clear", clear_data))
+    dp.add_handler(CommandHandler("report", show_report))
+    dp.add_handler(MessageHandler(Filters.document, handle_document))
+    dp.add_error_handler(error_handler)
     
     # Запускаем бота
     logger.info("🤖 Бот запущен...")
-    application.run_polling()
+    updater.start_polling()
+    updater.idle()
 
 if __name__ == "__main__":
     main()
