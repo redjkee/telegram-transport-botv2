@@ -279,11 +279,11 @@ async def generate_report(message: Message, data, title):
         if len(car_data['files']) > 3:
             files += f" ... (еще {len(car_data['files']) - 3})"
         
-        car_reports.append(f"🚗 *{car_plate}*\n"
-                         f"• Поездок: {car_data['trips_count']}\n"
-                         f"• Водители: {drivers}\n"
-                         f"• Файлы: {files}\n"
-                         f"• Общая сумма: {car_data['total_amount']:,.0f} руб.\n")
+car_reports.append(f"🚗 {car_plate}\n"
+                 f"• Поездок: {car_data['trips_count']}\n"
+                 f"• Водители: {drivers}\n"
+                 f"• Файлы: {files}\n"
+                 f"• Общая сумма: {car_data['total_amount']:,.0f} руб.")
     
     response = f"""
 📊 *{title}*
@@ -304,10 +304,10 @@ async def generate_report(message: Message, data, title):
     if len(response) > 4000:
         parts = [response[i:i+4000] for i in range(0, len(response), 4000)]
         for part in parts:
-            await message.answer(part, parse_mode='Markdown')
+            await message.answer(part)
             await asyncio.sleep(0.5)
     else:
-        await message.answer(response, parse_mode='Markdown')
+        await message.answer(response)
 
 async def main():
     await dp.start_polling(bot)
