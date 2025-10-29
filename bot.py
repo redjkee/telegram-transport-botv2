@@ -24,22 +24,59 @@ logging.basicConfig(
 
 user_data = {}
 
-# --- ИСПРАВЛЕНИЕ: Команда /start больше не удаляет данные ---
+# --- ВНУТРЕННИЕ ЛОГИЧЕСКИЕ ФУНКЦИИ (для чистоты кода) ---
+# Эти функции просто готовят текст ответа, не отправляя его.
+
+def _build_stats_message(user_id: int) -> str:
+    """Готовит текст для общей статистики."""
+    if user_id not in user_data or user_data[user_id].empty:
+        return "ℹ️ Данные для анализа отсутствуют. Загрузите файлы."
+    
+    df = user_data[user_id]
+    total_trips = len(df)
+    total_earnings = df['Стоимость'].sum()
+    unique_cars_count = df['Гос_номер'].nunique()
+    unique_drivers_count = df['Водитель'].nunique()
+    unique_files_count = df['Источник'].nunique()
+
+    return (
+        f"📊 *Общая статистика*\n\n"
+        f"▫️ Обработано файлов: {unique_files_count}\n"
+        f"▫️ Всего маршрутов: {total_trips}\n"
+        f"▫️ Общий заработок: *{total_earnings:,.2f} руб.*\n"
+        f"▫️ Уникальных машин: {unique_cars_count}\n"
+        f"▫️ Уникальных водителей: {unique_drivers_count}"
+    )
+
+def _build_top_stats_message(user_id: int) -> str:
+    """Готовит текст для топа водителей и машин."""
+    if user_id not in user_data or user_data[user_id].empty:
+        return "ℹ️ Данные для анализа отсутствуют."
+
+    df = user_data[user_id]
+    top_drivers = df.groupby('Водитель')['Стоимость'].sum().nlargest(5)
+    top_drivers_text = "".join([f"{i}. {driver} - {total:,.0f} руб.\n" for i, (driver, total) in enumerate(top_drivers.items(), 1)])
+    top_cars = df.groupby('Гос_номер')['Стоимость'].sum().nlargest(5)
+    top_cars_text = "".join([f"{i}. Номер {car} - {total:,.0f} руб.\n" for i, (car, total) in enumerate(top_cars.items(), 1)])
+
+    return (
+        f"🏆 *Топ-5 по заработку*\n\n"
+        f"👤 *Лучшие водители:*\n{top_drivers_text or 'Нет данных'}\n"
+        f"🚗 *Самые прибыльные машины:*\n{top_cars_text or 'Нет данных'}"
+    )
+
+# --- ОБРАБОТЧИКИ КОМАНД И КНОПОК (теперь они проще) ---
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    
     welcome_text = (
         "👋 Привет! Я бот для анализа поездок.\n\n"
-        "Просто отправьте мне один или несколько Excel-файлов (.xlsx) с отчетами. "
+        "Просто отправьте мне один или несколько Excel-файлов (.xlsx). "
         "Когда закончите, используйте кнопки ниже для получения статистики."
     )
-    
-    # Сообщаем пользователю, если у него уже есть данные
     if user_id in user_data and not user_data[user_id].empty:
-        records_count = len(user_data[user_id])
-        welcome_text += f"\n\nℹ️ У вас уже загружено записей: {records_count}. " \
-                        "Для сброса используйте кнопку 'Очистить данные'."
-
+        welcome_text += f"\n\nℹ️ У вас уже загружено записей: {len(user_data[user_id])}."
+    
     keyboard = [
         [InlineKeyboardButton("📊 Общая статистика", callback_data='stats')],
         [
@@ -49,125 +86,36 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🗑️ Очистить данные", callback_data='clear')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-        
     await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
-# --- ИСПРАВЛЕНИЕ: Теперь все функции вызываются единообразно ---
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
+    user_id = query.from_user.id
     command = query.data
-    # Передаем весь объект update, чтобы функции работали универсально
+
     if command == 'stats':
-        await show_stats(update, context, is_callback=True)
-    elif command == 'clear':
-        await clear(update, context, is_callback=True)
+        message_text = _build_stats_message(user_id)
+        await query.edit_message_text(text=message_text, parse_mode='Markdown')
+    
     elif command == 'top':
-        await show_top_stats(update, context, is_callback=True)
+        message_text = _build_top_stats_message(user_id)
+        await query.edit_message_text(text=message_text, parse_mode='Markdown')
+
+    elif command == 'clear':
+        if user_id in user_data:
+            del user_data[user_id]
+            message_text = "🗑️ Все загруженные данные удалены."
+        else:
+            message_text = "ℹ️ У вас нет загруженных данных для очистки."
+        await query.edit_message_text(text=message_text)
+        # После очистки покажем новое меню
+        await start(query, context)
+
     elif command == 'export':
         await export_data(update, context)
 
-# --- ИСПРАВЛЕНИЕ: функции теперь правильно обрабатывают вызовы от кнопок ---
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    
-    if user_id not in user_data or user_data[user_id].empty:
-        await context.bot.send_message(chat_id, "ℹ️ Данные для анализа отсутствуют. Загрузите файлы.")
-        return
-    
-    df = user_data[user_id]
-    # ... остальная логика функции ...
-    total_trips = len(df)
-    total_earnings = df['Стоимость'].sum()
-    unique_cars_count = df['Гос_номер'].nunique()
-    unique_drivers_count = df['Водитель'].nunique()
-    unique_files_count = df['Источник'].nunique()
 
-    message = (
-        f"📊 *Общая статистика*\n\n"
-        f"▫️ Обработано файлов: {unique_files_count}\n"
-        f"▫️ Всего маршрутов: {total_trips}\n"
-        f"▫️ Общий заработок: *{total_earnings:,.2f} руб.*\n"
-        f"▫️ Уникальных машин: {unique_cars_count}\n"
-        f"▫️ Уникальных водителей: {unique_drivers_count}"
-    )
-
-    if is_callback:
-        await update.callback_query.edit_message_text(text=message, parse_mode='Markdown')
-    else:
-        await context.bot.send_message(chat_id, text=message, parse_mode='Markdown')
-
-async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    if user_id in user_data:
-        del user_data[user_id]
-        message = "🗑️ Все загруженные данные удалены. Можете начать сначала."
-    else:
-        message = "ℹ️ У вас нет загруженных данных для очистки."
-
-    if is_callback:
-        # При нажатии на кнопку, редактируем сообщение с меню
-        await update.callback_query.edit_message_text(text=message)
-    else:
-        await context.bot.send_message(chat_id, text=message)
-
-async def show_top_stats(update: Update, context: ContextTypes.DEFAULT_TYPE, is_callback=False):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    if user_id not in user_data or user_data[user_id].empty:
-        await context.bot.send_message(chat_id, "ℹ️ Данные для анализа отсутствуют.")
-        return
-
-    df = user_data[user_id]
-    top_drivers = df.groupby('Водитель')['Стоимость'].sum().nlargest(5)
-    top_drivers_text = "".join([f"{i}. {driver} - {total:,.0f} руб.\n" for i, (driver, total) in enumerate(top_drivers.items(), 1)])
-    top_cars = df.groupby('Гос_номер')['Стоимость'].sum().nlargest(5)
-    top_cars_text = "".join([f"{i}. Номер {car} - {total:,.0f} руб.\n" for i, (car, total) in enumerate(top_cars.items(), 1)])
-
-    message = (
-        f"🏆 *Топ-5 по заработку*\n\n"
-        f"👤 *Лучшие водители:*\n{top_drivers_text}\n"
-        f"🚗 *Самые прибыльные машины:*\n{top_cars_text}"
-    )
-    
-    if is_callback:
-        await update.callback_query.edit_message_text(text=message, parse_mode='Markdown')
-    else:
-        await context.bot.send_message(chat_id, text=message, parse_mode='Markdown')
-
-async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-
-    if user_id not in user_data or user_data[user_id].empty:
-        await context.bot.send_message(chat_id, "ℹ️ Нет данных для экспорта.")
-        return
-        
-    # ... остальная логика функции ...
-    df = user_data[user_id]
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='Сводный отчет')
-        worksheet = writer.sheets['Сводный отчет']
-        for idx, col in enumerate(df):
-            series = df[col]
-            max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 1
-            worksheet.set_column(idx, idx, max_len)
-    output.seek(0)
-    
-    await context.bot.send_document(
-        chat_id=chat_id, 
-        document=output, 
-        filename='сводный_отчет.xlsx',
-        caption='📊 Ваш сводный отчет по всем загруженным файлам.'
-    )
-
-# --- Остальные функции (без изменений, но привожу для полноты) ---
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     file = await update.message.document.get_file()
@@ -191,6 +139,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Добавлено записей: {len(new_df)}\n"
         f"Всего загружено записей: {total_rows}\n\n"
         "Отправьте еще файл или используйте кнопки для просмотра итогов."
+    )
+
+async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    if user_id not in user_data or user_data[user_id].empty:
+        await context.bot.send_message(chat_id, "ℹ️ Нет данных для экспорта.")
+        return
+        
+    df = user_data[user_id]
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Сводный отчет')
+        worksheet = writer.sheets['Сводный отчет']
+        for idx, col in enumerate(df):
+            series = df[col]
+            max_len = max((series.astype(str).map(len).max(), len(str(series.name)))) + 1
+            worksheet.set_column(idx, idx, max_len)
+    output.seek(0)
+    await context.bot.send_document(
+        chat_id=chat_id, 
+        document=output, 
+        filename='сводный_отчет.xlsx',
+        caption='📊 Ваш сводный отчет по всем загруженным файлам.'
     )
 
 async def car_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,17 +237,15 @@ if __name__ == '__main__':
 
     application = ApplicationBuilder().token(TOKEN).build()
     
+    # Регистрируем все обработчики
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('stats', show_stats))
-    application.add_handler(CommandHandler('clear', clear))
-    application.add_handler(CommandHandler('top', show_top_stats))
-    application.add_handler(CommandHandler('export', export_data))
     application.add_handler(CommandHandler('car', car_stats))
     application.add_handler(CommandHandler('driver', driver_stats))
     
     application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
+    # Запускаем фоновый сервер
     health_thread = threading.Thread(target=run_health_check_server)
     health_thread.daemon = True
     health_thread.start()
