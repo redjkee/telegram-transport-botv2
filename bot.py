@@ -1,12 +1,9 @@
 import os
 import logging
-import pandas as pd
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from openpyxl import load_workbook
 import re
-from pathlib import Path
-from datetime import datetime
 import tempfile
 import asyncio
 from collections import defaultdict
@@ -21,10 +18,10 @@ logger = logging.getLogger(__name__)
 # Токен бота из переменных окружения
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 
-# Хранилище для данных пользователей (в памяти)
+# Хранилище для данных пользователей
 user_data_store = defaultdict(list)
 
-# Функции парсинга
+# Функции парсинга (БЕЗ PANDAS)
 def find_table_structure(ws):
     headers_positions = {}
     for row in ws.iter_rows():
@@ -124,6 +121,60 @@ def parse_invoice_file(file_path):
         logger.error(f"Ошибка при обработке файла: {e}")
         return []
 
+# Функции для статистики БЕЗ PANDAS
+def calculate_statistics(data):
+    """Расчет статистики без pandas"""
+    if not data:
+        return None
+    
+    # Общая статистика
+    total_trips = len(data)
+    total_amount = sum(item['Стоимость'] for item in data)
+    
+    # Уникальные значения
+    unique_cars = set(item['Гос_номер'] for item in data)
+    unique_drivers = set(item['Водитель'] for item in data)
+    unique_files = set(item['Файл'] for item in data)
+    
+    # Статистика по автомобилям
+    car_stats = {}
+    for item in data:
+        car_plate = item['Гос_номер']
+        if car_plate not in car_stats:
+            car_stats[car_plate] = {
+                'total_amount': 0,
+                'trips_count': 0,
+                'drivers': set(),
+                'files': set()
+            }
+        
+        car_stats[car_plate]['total_amount'] += item['Стоимость']
+        car_stats[car_plate]['trips_count'] += 1
+        car_stats[car_plate]['drivers'].add(item['Водитель'])
+        car_stats[car_plate]['files'].add(item['Файл'])
+    
+    return {
+        'total_trips': total_trips,
+        'total_amount': total_amount,
+        'unique_cars': len(unique_cars),
+        'unique_drivers': len(unique_drivers),
+        'unique_files': len(unique_files),
+        'car_stats': car_stats
+    }
+
+def calculate_file_statistics(file_data):
+    """Статистика по одному файлу"""
+    if not file_data:
+        return None
+    
+    total_amount = sum(item['Стоимость'] for item in file_data)
+    trips_count = len(file_data)
+    
+    return {
+        'total_amount': total_amount,
+        'trips_count': trips_count
+    }
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     welcome_text = """
@@ -196,29 +247,24 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Сохраняем данные пользователя
         user_data_store[user_id].extend(file_data)
         
-        # Статистика по файлу
-        df_file = pd.DataFrame(file_data)
-        file_total = df_file['Стоимость'].sum()
-        file_trips = len(df_file)
+        # Статистика по файлу (БЕЗ PANDAS)
+        file_stats = calculate_file_statistics(file_data)
         
-        # Общая статистика пользователя
+        # Общая статистика пользователя (БЕЗ PANDAS)
         user_data = user_data_store[user_id]
-        df_all = pd.DataFrame(user_data)
-        total_files = len(set(item['Файл'] for item in user_data))
-        all_total = df_all['Стоимость'].sum() if not user_data else 0
-        all_trips = len(user_data)
+        all_stats = calculate_statistics(user_data)
         
         response = f"""
 📄 *Файл обработан: {document.file_name}*
 
 *Данные файла:*
-• Поездок в файле: {file_trips}
-• Сумма в файле: {file_total:,.0f} руб.
+• Поездок в файле: {file_stats['trips_count']}
+• Сумма в файле: {file_stats['total_amount']:,.0f} руб.
 
 *Общая статистика:*
-• Файлов загружено: {total_files}
-• Всего поездок: {all_trips}
-• Общая сумма: {all_total:,.0f} руб.
+• Файлов загружено: {all_stats['unique_files']}
+• Всего поездок: {all_stats['total_trips']}
+• Общая сумма: {all_stats['total_amount']:,.0f} руб.
 
 💡 Отправьте еще файлы или используйте /report для получения отчета
         """
@@ -230,44 +276,37 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Произошла ошибка при обработке файла")
 
 async def generate_report(update: Update, data, title):
-    """Генерация отчета"""
+    """Генерация отчета (БЕЗ PANDAS)"""
     if not data:
         await update.message.reply_text("❌ Нет данных для отчета")
         return
     
-    df = pd.DataFrame(data)
+    stats = calculate_statistics(data)
     
-    # Группируем по автомобилям
+    # Формируем отчет по автомобилям
     car_reports = []
-    for car_plate, group in df.groupby('Гос_номер'):
-        total_amount = group['Стоимость'].sum()
-        trips_count = len(group)
-        drivers = ', '.join(group['Водитель'].unique())
-        files = ', '.join(set(group['Файл']))
+    for car_plate, car_data in stats['car_stats'].items():
+        drivers = ', '.join(car_data['drivers'])
+        files = ', '.join(list(car_data['files'])[:3])  # Показываем первые 3 файла
+        if len(car_data['files']) > 3:
+            files += f" ... (еще {len(car_data['files']) - 3})"
         
         car_reports.append(f"🚗 *{car_plate}*\n"
-                         f"• Поездок: {trips_count}\n"
+                         f"• Поездок: {car_data['trips_count']}\n"
                          f"• Водители: {drivers}\n"
-                         f"• Файлы: {files[:50]}...\n"
-                         f"• Общая сумма: {total_amount:,.0f} руб.\n")
-    
-    # Общая статистика
-    total_trips = len(df)
-    total_amount = df['Стоимость'].sum()
-    unique_cars = df['Гос_номер'].nunique()
-    unique_drivers = df['Водитель'].nunique()
-    unique_files = df['Файл'].nunique()
+                         f"• Файлы: {files}\n"
+                         f"• Общая сумма: {car_data['total_amount']:,.0f} руб.\n")
     
     # Формируем ответ
     response = f"""
 📊 *{title}*
 
 *Общая статистика:*
-• Файлов обработано: {unique_files}
-• Всего поездок: {total_trips}
-• Автомобилей: {unique_cars}  
-• Водителей: {unique_drivers}
-• Общая сумма: {total_amount:,.0f} руб.
+• Файлов обработано: {stats['unique_files']}
+• Всего поездок: {stats['total_trips']}
+• Автомобилей: {stats['unique_cars']}  
+• Водителей: {stats['unique_drivers']}
+• Общая сумма: {stats['total_amount']:,.0f} руб.
 
 *По автомобилям:*
 {chr(10).join(car_reports)}
@@ -275,7 +314,7 @@ async def generate_report(update: Update, data, title):
 ✅ Отчет сформирован!
     """
     
-    # Разбиваем длинные сообщения (Telegram ограничение 4096 символов)
+    # Разбиваем длинные сообщения
     if len(response) > 4000:
         parts = []
         current_part = ""
