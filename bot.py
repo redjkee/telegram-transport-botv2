@@ -4,8 +4,6 @@ import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import Message
-import pandas as pd
-import io
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
@@ -366,13 +364,33 @@ async def handle_text_message(message: Message):
         else:
             await message.answer(f"❌ Водитель '{search_text}' не найден")
 
-# Добавьте сюда вашу существующую функцию обработки файлов
+# Заглушка для обработки файлов
 @dp.message(lambda message: message.document)
 async def handle_document(message: Message):
     """Обработка загружаемых файлов"""
-    # Ваша существующая логика обработки Excel файлов
     user_id = message.from_user.id
-    # ... ваш код обработки файла ...
+    if user_id not in user_data_store:
+        user_data_store[user_id] = []
+    
+    # Здесь будет твоя логика обработки Excel файлов
+    # Пока просто добавляем тестовые данные
+    user_data_store[user_id].extend([
+        {
+            'Файл': 'test.xlsx',
+            'Дата': '2024-01-01',
+            'Гос_номер': 'А123БВ777',
+            'Водитель': 'Иванов',
+            'Стоимость': 1500
+        },
+        {
+            'Файл': 'test.xlsx', 
+            'Дата': '2024-01-02',
+            'Гос_номер': 'В456ГД777',
+            'Водитель': 'Петров',
+            'Стоимость': 2000
+        }
+    ])
+    
     await message.answer("📁 Файл получен! Используйте команды /report, /cars, /drivers для просмотра отчетов.")
 
 async def main():
