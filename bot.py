@@ -1,7 +1,7 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, filters, CallbackContext
+from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
 from openpyxl import load_workbook
 import re
 import tempfile
@@ -20,7 +20,7 @@ BOT_TOKEN = os.getenv('BOT_TOKEN')
 # Хранилище для данных пользователей
 user_data_store = defaultdict(list)
 
-# Функции парсинга
+# Функции парсинга (остаются без изменений)
 def find_table_structure(ws):
     headers_positions = {}
     for row in ws.iter_rows():
@@ -120,9 +120,8 @@ def parse_invoice_file(file_path):
         logger.error(f"Ошибка при обработке файла: {e}")
         return []
 
-# Функции для статистики БЕЗ PANDAS
+# Функции для статистики БЕЗ PANDAS (остаются без изменений)
 def calculate_statistics(data):
-    """Расчет статистики без pandas"""
     if not data:
         return None
     
@@ -159,7 +158,6 @@ def calculate_statistics(data):
     }
 
 def calculate_file_statistics(file_data):
-    """Статистика по одному файлу"""
     if not file_data:
         return None
     
@@ -171,8 +169,7 @@ def calculate_file_statistics(file_data):
         'trips_count': trips_count
     }
 
-def start(update: Update, context: CallbackContext):
-    """Обработчик команды /start"""
+def start(update, context):
     welcome_text = """
 🚛 *Transport Analytics Bot*
 
@@ -193,15 +190,13 @@ def start(update: Update, context: CallbackContext):
     """
     update.message.reply_text(welcome_text, parse_mode='Markdown')
 
-def clear_data(update: Update, context: CallbackContext):
-    """Очистка данных пользователя"""
-    user_id = update.effective_user.id
+def clear_data(update, context):
+    user_id = update.message.from_user.id
     user_data_store[user_id] = []
     update.message.reply_text("✅ Все данные очищены! Можно загружать новые файлы.")
 
-def show_report(update: Update, context: CallbackContext):
-    """Показать отчет по текущим данным"""
-    user_id = update.effective_user.id
+def show_report(update, context):
+    user_id = update.message.from_user.id
     user_data = user_data_store[user_id]
     
     if not user_data:
@@ -210,10 +205,9 @@ def show_report(update: Update, context: CallbackContext):
     
     generate_report(update, user_data, "ТЕКУЩИЙ ОТЧЕТ")
 
-def handle_document(update: Update, context: CallbackContext):
-    """Обработчик загруженных файлов"""
+def handle_document(update, context):
     try:
-        user_id = update.effective_user.id
+        user_id = update.message.from_user.id
         
         document = update.message.document
         file = context.bot.get_file(document.file_id)
@@ -225,7 +219,7 @@ def handle_document(update: Update, context: CallbackContext):
         update.message.reply_text(f"🔍 Обрабатываю файл: {document.file_name}")
         
         with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
-            file.download(out=temp_file)
+            file.download(temp_file.name)
             
             file_data = parse_invoice_file(temp_file.name)
             
@@ -262,8 +256,7 @@ def handle_document(update: Update, context: CallbackContext):
         logger.error(f"Ошибка: {e}")
         update.message.reply_text("❌ Произошла ошибка при обработке файла")
 
-def generate_report(update: Update, data, title):
-    """Генерация отчета"""
+def generate_report(update, data, title):
     if not data:
         update.message.reply_text("❌ Нет данных для отчета")
         return
@@ -315,24 +308,23 @@ def generate_report(update: Update, data, title):
     else:
         update.message.reply_text(response, parse_mode='Markdown')
 
-def error_handler(update: Update, context: CallbackContext):
-    """Обработчик ошибок"""
+def error_handler(update, context):
     logger.error(f"Ошибка: {context.error}")
     update.message.reply_text("❌ Произошла ошибка. Попробуйте еще раз.")
 
 def main():
-    """Запуск бота"""
     if not BOT_TOKEN:
         logger.error("❌ BOT_TOKEN не установлен!")
         return
     
-    updater = Updater(token=BOT_TOKEN, use_context=True)
+    # ПРАВИЛЬНЫЙ СИНТАКСИС ДЛЯ 12.8
+    updater = Updater(BOT_TOKEN, use_context=True)
     dp = updater.dispatcher
     
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(CommandHandler("clear", clear_data))
-    dp.add_handler(CommandHandler("report", show_report))
-    dp.add_handler(MessageHandler(filters.document, handle_document))
+    dp.add_handler(CommandHandler("start", start, pass_args=True))
+    dp.add_handler(CommandHandler("clear", clear_data, pass_args=True))
+    dp.add_handler(CommandHandler("report", show_report, pass_args=True))
+    dp.add_handler(MessageHandler(Filters.document, handle_document, pass_args=True))
     dp.add_error_handler(error_handler)
     
     logger.info("🤖 Бот запущен...")
