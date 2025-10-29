@@ -430,7 +430,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Запуск бота"""
     # Получаем токен из переменных окружения Render
-    TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+    TOKEN = os.getenv('BOT_TOKEN')
     
     if not TOKEN:
         logger.error("Токен бота не найден в переменных окружения!")
