@@ -314,3 +314,20 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
+from aiohttp import web
+import threading
+
+# Простой HTTP сервер для Render
+async def health_check(request):
+    return web.Response(text="Bot is alive")
+
+def run_http_server():
+    app = web.Application()
+    app.router.add_get('/health', health_check)
+    web.run_app(app, host='0.0.0.0', port=8080)
+
+# Запускаем HTTP сервер в отдельном потоке
+http_thread = threading.Thread(target=run_http_server, daemon=True)
+http_thread.start()
+
