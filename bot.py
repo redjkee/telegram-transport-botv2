@@ -1,4 +1,4 @@
-# bot.py (ВЕРСИЯ 5.0 - С ИНТЕГРАЦИЕЙ POSTGRESQL)
+# bot.py (ВЕРСИЯ 5.1 - С УЛУЧШЕННОЙ ОБРАБОТКОЙ ОШИБОК)
 
 import os
 import logging
@@ -18,8 +18,6 @@ from telegram.ext import (
 from telegram.error import BadRequest
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
-# Импортируем наши новые модули
 from parser import process_excel_file
 import db
 
@@ -27,13 +25,9 @@ import db
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# --- Состояния для диалогов ---
-(
-    ASK_CAR_STATS, ASK_DRIVER_STATS,
-    ASK_CAR_EXPORT, ASK_DRIVER_EXPORT
-) = range(4)
+(ASK_CAR_STATS, ASK_DRIVER_STATS, ASK_CAR_EXPORT, ASK_DRIVER_EXPORT) = range(4)
 
-# --- Клавиатуры ---
+# --- Клавиатуры (без изменений) ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Общая статистика", callback_data='main_stats')],
@@ -43,6 +37,7 @@ def get_main_menu_keyboard():
         [InlineKeyboardButton("🏆 Топ-5", callback_data='main_top')],
         [InlineKeyboardButton("🗑️ Очистить данные", callback_data='main_clear')],
     ])
+# ... (остальные клавиатуры из предыдущей версии) ...
 def get_export_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📄 Полный отчет", callback_data='export_full')],
@@ -58,17 +53,15 @@ post_upload_keyboard = InlineKeyboardMarkup([
 cancel_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='cancel_conversation')]])
 back_to_main_menu_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='back_to_main_menu')]])
 
-# --- Главное меню и навигация ---
-
+# --- Функции-обработчики (без изменений) ---
+# ... (start, button_handler, ask_for_input и все остальные) ...
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет главное меню."""
     user_id = update.effective_user.id
     welcome_text = (
-        "👋 **Аналитический бот v5.0 (с БД)**\n\n"
+        "👋 **Аналитический бот v5.1 (с БД)**\n\n"
         "Этот бот предназначен для автоматического анализа отчетов о поездках. "
         "Все ваши данные надежно сохраняются."
     )
-    
     df = await db.get_all_trips_as_df(user_id)
     if not df.empty:
         files_count = await db.get_processed_files_count(user_id)
@@ -78,24 +71,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"▫️ Всего записей: {len(df)}\n"
             f"▫️ Общий доход: *{df['Стоимость'].sum():,.0f} руб.*"
         )
-    
     if update.callback_query:
         await update.callback_query.edit_message_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
     else:
         await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
-        
     return ConversationHandler.END
-
-# --- Универсальный обработчик кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     command = query.data
-    
     df = await db.get_all_trips_as_df(user_id)
     has_data = not df.empty
-
     if command == 'back_to_main_menu':
         await start(update, context)
         return
@@ -109,7 +96,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not has_data:
         await query.edit_message_text("ℹ️ Данные для анализа отсутствуют. Загрузите файлы.", reply_markup=back_to_main_menu_keyboard)
         return
-
     if command == 'main_stats':
         files_count = await db.get_processed_files_count(user_id)
         message = (f"📊 *Общая статистика*\n\n"
@@ -139,8 +125,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for item, total in summary.items():
             summary_text += f"▫️ {item}: *{total:,.0f} руб.*\n"
         await query.edit_message_text(summary_text, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
-
-# --- Логика диалогов (ConversationHandler) ---
 async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -222,21 +206,16 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     file = await update.message.document.get_file()
     file_name = update.message.document.file_name
-    
     if await db.check_if_file_processed(user_id, file_name):
         await update.message.reply_text(f"⚠️ Файл '{file_name}' уже был загружен ранее. Загрузка пропущена.")
         return
-        
     await update.message.reply_text(f"⏳ Получил файл '{file_name}'. Обрабатываю...")
     file_content = await file.download_as_bytearray()
     new_df = process_excel_file(bytes(file_content), file_name)
-    
     if new_df is None or new_df.empty:
         await update.message.reply_text(f"⚠️ Не удалось извлечь данные из файла '{file_name}'.")
         return
-    
     await db.add_trips_from_df(user_id, new_df)
-    
     full_df = await db.get_all_trips_as_df(user_id)
     message_text = (f"✅ Файл '{file_name}' успешно обработан!\n"
                     f"Добавлено записей: {len(new_df)}\n"
@@ -252,8 +231,9 @@ def run_health_check_server():
 
 async def main():
     """Основная функция для запуска бота."""
-    # Инициализируем БД при старте
-    await db.init_db()
+    if not await db.init_db():
+        logging.critical("Could not initialize database. Bot is shutting down.")
+        return
 
     TOKEN = os.getenv('TELEGRAM_TOKEN')
     if not TOKEN: raise ValueError("Необходимо установить переменную окружения TELEGRAM_TOKEN")
@@ -276,6 +256,8 @@ async def main():
             CommandHandler('start', start),
             CallbackQueryHandler(cancel_conversation, pattern='^cancel_conversation$')
         ],
+        # ИСПРАВЛЕНИЕ: Добавляем параметр, чтобы убрать предупреждение
+        per_message=False
     )
     
     application.add_handler(CommandHandler('start', start))
@@ -285,8 +267,15 @@ async def main():
     
     threading.Thread(target=run_health_check_server, daemon=True).start()
     
-    print("Бот запущен в финальной версии (v5.0 с PostgreSQL)...")
+    print("Бот запущен в финальной версии (v5.1 с PostgreSQL)...")
     await application.run_polling()
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    # ИСПРАВЛЕНИЕ: Добавляем обработку ошибки RuntimeError при остановке
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "Cannot close a running event loop" in str(e):
+            logging.warning("Ignoring expected RuntimeError on shutdown.")
+        else:
+            raise
