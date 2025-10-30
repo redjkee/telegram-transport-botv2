@@ -1,4 +1,4 @@
-# bot.py (ВЕРСИЯ 5.3 - ЕДИНЫЙ ЦИКЛ ЗАПУСКА)
+# bot.py (ВЕРСИЯ 6.0 - НОРМАЛИЗОВАННАЯ БД, ПОЛНЫЙ КОД)
 
 import os
 import logging
@@ -7,7 +7,7 @@ import io
 import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Application, # <-- импортируем Application для type hinting
+    Application,
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
@@ -28,7 +28,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 (ASK_CAR_STATS, ASK_DRIVER_STATS, ASK_CAR_EXPORT, ASK_DRIVER_EXPORT) = range(4)
 
-# --- Клавиатуры (без изменений) ---
+# --- Клавиатуры ---
 def get_main_menu_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Общая статистика", callback_data='main_stats')],
@@ -53,27 +53,40 @@ post_upload_keyboard = InlineKeyboardMarkup([
 cancel_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='cancel_conversation')]])
 back_to_main_menu_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='back_to_main_menu')]])
 
-# --- НОВАЯ ФУНКЦИЯ ДЛЯ ИНИЦИАЛИЗАЦИИ ---
+# --- Инициализация БД ---
 async def post_init(application: Application):
     """Выполняется один раз после создания Application, но до запуска polling."""
     if not await db.init_db():
         logging.critical("CRITICAL: Could not initialize database. Bot will not function correctly.")
 
-# --- Функции-обработчики (без изменений) ---
-# ... (start, button_handler, и все остальные функции до HealthCheckHandler) ...
+# --- Главное меню и навигация ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет главное меню и обновляет данные о пользователе."""
+    await db.get_or_create_user(update)
     user_id = update.effective_user.id
-    welcome_text = ("👋 **Аналитический бот v5.3 (с БД)**\n\nЭтот бот предназначен для автоматического анализа отчетов о поездках. Все ваши данные надежно сохраняются.")
+    welcome_text = (
+        "👋 **Аналитический бот v6.0 (Normalized DB)**\n\n"
+        "Этот бот предназначен для автоматического анализа отчетов о поездках. "
+        "Все ваши данные надежно сохраняются в реляционной базе данных."
+    )
     df = await db.get_all_trips_as_df(user_id)
     if not df.empty:
-        files_count = await db.get_processed_files_count(user_id)
-        welcome_text += (f"\n\n**Текущая сессия:**\n▫️ Загружено файлов: {files_count}\n▫️ Всего записей: {len(df)}\n▫️ Общий доход: *{df['Стоимость'].sum():,.0f} руб.*")
+        processed_files = await db.get_processed_files(user_id)
+        welcome_text += (
+            f"\n\n**Текущая сессия:**\n"
+            f"▫️ Загружено файлов: {len(processed_files)}\n"
+            f"▫️ Всего записей: {len(df)}\n"
+            f"▫️ Общий доход: *{df['Стоимость'].sum():,.0f} руб.*"
+        )
     if update.callback_query:
         await update.callback_query.edit_message_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
     else:
         await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
     return ConversationHandler.END
+
+# --- Универсальный обработчик кнопок ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -95,8 +108,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("ℹ️ Данные для анализа отсутствуют. Загрузите файлы.", reply_markup=back_to_main_menu_keyboard)
             return
         if command == 'main_stats':
-            files_count = await db.get_processed_files_count(user_id)
-            message = (f"📊 *Общая статистика*\n\n▫️ Обработано файлов: {files_count}\n▫️ Всего маршрутов: {len(df)}\n▫️ Общий заработок: *{df['Стоимость'].sum():,.2f} руб.*\n▫️ Уникальных машин: {df['Гос_номер'].nunique()}\n▫️ Уникальных водителей: {df['Водитель'].nunique()}")
+            processed_files = await db.get_processed_files(user_id)
+            message = (f"📊 *Общая статистика*\n\n▫️ Обработано файлов: {len(processed_files)}\n▫️ Всего маршрутов: {len(df)}\n▫️ Общий заработок: *{df['Стоимость'].sum():,.2f} руб.*\n▫️ Уникальных машин: {df['Гос_номер'].nunique()}\n▫️ Уникальных водителей: {df['Водитель'].nunique()}")
             await query.edit_message_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
         elif command == 'main_top':
             top_drivers = df.groupby('Водитель')['Стоимость'].sum().nlargest(5)
@@ -123,7 +136,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"An error occurred in button_callback: {e}")
         try: await query.edit_message_text("❌ Произошла ошибка.", reply_markup=back_to_main_menu_keyboard)
         except Exception as e2: logging.error(f"Could not send error message to user: {e2}")
+
+# --- Логика диалогов ---
 async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     query = update.callback_query
     await query.answer()
     action = query.data
@@ -140,6 +156,7 @@ async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("👤 Введите фамилию для экспорта отчета:", reply_markup=cancel_keyboard)
         return ASK_DRIVER_EXPORT
 async def handle_car_stats_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     user_input = update.message.text
     user_id = update.effective_user.id
     df = await db.get_all_trips_as_df(user_id)
@@ -152,6 +169,7 @@ async def handle_car_stats_input(update: Update, context: ContextTypes.DEFAULT_T
     await update.message.reply_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 async def handle_driver_stats_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     user_input = update.message.text
     user_id = update.effective_user.id
     df = await db.get_all_trips_as_df(user_id)
@@ -164,6 +182,7 @@ async def handle_driver_stats_input(update: Update, context: ContextTypes.DEFAUL
     await update.message.reply_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 async def handle_car_export_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     user_input = update.message.text
     user_id = update.effective_user.id
     df = await db.get_all_trips_as_df(user_id)
@@ -175,6 +194,7 @@ async def handle_car_export_input(update: Update, context: ContextTypes.DEFAULT_
     await update.message.reply_text("Выберите следующее действие:", reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 async def handle_driver_export_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     user_input = update.message.text
     user_id = update.effective_user.id
     df = await db.get_all_trips_as_df(user_id)
@@ -196,16 +216,19 @@ async def send_excel_report(df: pd.DataFrame, chat_id: int, context: ContextType
     output.seek(0)
     await context.bot.send_document(chat_id=chat_id, document=output, filename=filename, caption='📊 Ваш отчет готов.')
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Действие отменено.", reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await db.get_or_create_user(update)
     user_id = update.effective_user.id
     file = await update.message.document.get_file()
     file_name = update.message.document.file_name
-    if await db.check_if_file_processed(user_id, file_name):
-        await update.message.reply_text(f"⚠️ Файл '{file_name}' уже был загружен ранее. Загрузка пропущена.")
+    processed_files = await db.get_processed_files(user_id)
+    if file_name in processed_files:
+        await update.message.reply_text(f"⚠️ Файл '{file_name}' уже был обработан ранее. Загрузка пропущена.")
         return
     await update.message.reply_text(f"⏳ Получил файл '{file_name}'. Обрабатываю...")
     file_content = await file.download_as_bytearray()
@@ -227,14 +250,10 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_check_server():
     port = int(os.environ.get("PORT", 8080)); httpd = HTTPServer(('', port), HealthCheckHandler); httpd.serve_forever()
 
-# --- Упрощенная и надежная структура запуска ---
 if __name__ == '__main__':
     TOKEN = os.getenv('TELEGRAM_TOKEN')
     if not TOKEN: raise ValueError("Необходимо установить переменную окружения TELEGRAM_TOKEN")
-    
-    # ИЗМЕНЕНИЕ: Используем post_init для инициализации БД
     application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
-    
     conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(ask_for_input, pattern='^main_ask_car_stats$'),
@@ -252,15 +271,12 @@ if __name__ == '__main__':
             CommandHandler('start', start),
             CallbackQueryHandler(cancel_conversation, pattern='^cancel_conversation$')
         ],
-        per_message=False # Убираем предупреждение
+        per_message=False
     )
-    
     application.add_handler(CommandHandler('start', start))
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
     threading.Thread(target=run_health_check_server, daemon=True).start()
-    
-    print("Бот запущен в финальной версии (v5.3 - Стабильный запуск)...")
+    print("Бот запущен в финальной версии (v6.0 - Нормализованная БД)...")
     application.run_polling()
