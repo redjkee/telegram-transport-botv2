@@ -1,12 +1,13 @@
-# bot.py (ВЕРСИЯ 5.2 - СТАБИЛЬНЫЙ ЗАПУСК)
+# bot.py (ВЕРСИЯ 5.3 - ЕДИНЫЙ ЦИКЛ ЗАПУСКА)
 
 import os
 import logging
 import pandas as pd
 import io
-import asyncio # <-- Важный импорт для инициализации БД
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
+    Application, # <-- импортируем Application для type hinting
     ApplicationBuilder,
     ContextTypes,
     CommandHandler,
@@ -52,24 +53,21 @@ post_upload_keyboard = InlineKeyboardMarkup([
 cancel_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='cancel_conversation')]])
 back_to_main_menu_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='back_to_main_menu')]])
 
+# --- НОВАЯ ФУНКЦИЯ ДЛЯ ИНИЦИАЛИЗАЦИИ ---
+async def post_init(application: Application):
+    """Выполняется один раз после создания Application, но до запуска polling."""
+    if not await db.init_db():
+        logging.critical("CRITICAL: Could not initialize database. Bot will not function correctly.")
+
 # --- Функции-обработчики (без изменений) ---
 # ... (start, button_handler, и все остальные функции до HealthCheckHandler) ...
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    welcome_text = (
-        "👋 **Аналитический бот v5.2 (с БД)**\n\n"
-        "Этот бот предназначен для автоматического анализа отчетов о поездках. "
-        "Все ваши данные надежно сохраняются."
-    )
+    welcome_text = ("👋 **Аналитический бот v5.3 (с БД)**\n\nЭтот бот предназначен для автоматического анализа отчетов о поездках. Все ваши данные надежно сохраняются.")
     df = await db.get_all_trips_as_df(user_id)
     if not df.empty:
         files_count = await db.get_processed_files_count(user_id)
-        welcome_text += (
-            f"\n\n**Текущая сессия:**\n"
-            f"▫️ Загружено файлов: {files_count}\n"
-            f"▫️ Всего записей: {len(df)}\n"
-            f"▫️ Общий доход: *{df['Стоимость'].sum():,.0f} руб.*"
-        )
+        welcome_text += (f"\n\n**Текущая сессия:**\n▫️ Загружено файлов: {files_count}\n▫️ Всего записей: {len(df)}\n▫️ Общий доход: *{df['Стоимость'].sum():,.0f} руб.*")
     if update.callback_query:
         await update.callback_query.edit_message_text(welcome_text, reply_markup=get_main_menu_keyboard(), parse_mode='Markdown')
     else:
@@ -98,21 +96,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if command == 'main_stats':
             files_count = await db.get_processed_files_count(user_id)
-            message = (f"📊 *Общая статистика*\n\n"
-                       f"▫️ Обработано файлов: {files_count}\n"
-                       f"▫️ Всего маршрутов: {len(df)}\n"
-                       f"▫️ Общий заработок: *{df['Стоимость'].sum():,.2f} руб.*\n"
-                       f"▫️ Уникальных машин: {df['Гос_номер'].nunique()}\n"
-                       f"▫️ Уникальных водителей: {df['Водитель'].nunique()}")
+            message = (f"📊 *Общая статистика*\n\n▫️ Обработано файлов: {files_count}\n▫️ Всего маршрутов: {len(df)}\n▫️ Общий заработок: *{df['Стоимость'].sum():,.2f} руб.*\n▫️ Уникальных машин: {df['Гос_номер'].nunique()}\n▫️ Уникальных водителей: {df['Водитель'].nunique()}")
             await query.edit_message_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
         elif command == 'main_top':
             top_drivers = df.groupby('Водитель')['Стоимость'].sum().nlargest(5)
             top_drivers_text = "".join([f"{i}. {d} - {t:,.0f} руб.\n" for i, (d, t) in enumerate(top_drivers.items(), 1)])
             top_cars = df.groupby('Гос_номер')['Стоимость'].sum().nlargest(5)
             top_cars_text = "".join([f"{i}. Номер {c} - {t:,.0f} руб.\n" for i, (c, t) in enumerate(top_cars.items(), 1)])
-            message = (f"🏆 *Топ-5 по заработку*\n\n"
-                       f"👤 *Лучшие водители:*\n{top_drivers_text or 'Нет данных'}\n"
-                       f"🚗 *Самые прибыльные машины:*\n{top_cars_text or 'Нет данных'}")
+            message = (f"🏆 *Топ-5 по заработку*\n\n👤 *Лучшие водители:*\n{top_drivers_text or 'Нет данных'}\n🚗 *Самые прибыльные машины:*\n{top_cars_text or 'Нет данных'}")
             await query.edit_message_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
         elif command == 'export_full':
             await send_excel_report(df, query.message.chat_id, context, "полный_отчет.xlsx")
@@ -126,16 +117,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 summary_text += f"▫️ {item}: *{total:,.0f} руб.*\n"
             await query.edit_message_text(summary_text, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
     except BadRequest as e:
-        if "Message is not modified" in str(e):
-            logging.info("Ignoring 'Message is not modified' error.")
-        else:
-            logging.error(f"An unexpected BadRequest error occurred: {e}")
+        if "Message is not modified" in str(e): logging.info("Ignoring 'Message is not modified' error.")
+        else: logging.error(f"An unexpected BadRequest error occurred: {e}")
     except Exception as e:
         logging.error(f"An error occurred in button_callback: {e}")
-        try:
-            await query.edit_message_text("❌ Произошла ошибка.", reply_markup=back_to_main_menu_keyboard)
-        except Exception as e2:
-            logging.error(f"Could not send error message to user: {e2}")
+        try: await query.edit_message_text("❌ Произошла ошибка.", reply_markup=back_to_main_menu_keyboard)
+        except Exception as e2: logging.error(f"Could not send error message to user: {e2}")
 async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -240,18 +227,13 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
 def run_health_check_server():
     port = int(os.environ.get("PORT", 8080)); httpd = HTTPServer(('', port), HealthCheckHandler); httpd.serve_forever()
 
-# --- ИЗМЕНЕНИЕ: Упрощенная и надежная структура запуска ---
+# --- Упрощенная и надежная структура запуска ---
 if __name__ == '__main__':
-    # Шаг 1: Инициализируем БД перед запуском всего остального
-    if not asyncio.run(db.init_db()):
-        logging.critical("CRITICAL: Could not initialize database. Bot is shutting down.")
-        exit(1) # Выходим с кодом ошибки, если нет БД
-
-    # Шаг 2: Собираем приложение
     TOKEN = os.getenv('TELEGRAM_TOKEN')
     if not TOKEN: raise ValueError("Необходимо установить переменную окружения TELEGRAM_TOKEN")
     
-    application = ApplicationBuilder().token(TOKEN).build()
+    # ИЗМЕНЕНИЕ: Используем post_init для инициализации БД
+    application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     
     conv_handler = ConversationHandler(
         entry_points=[
@@ -278,8 +260,7 @@ if __name__ == '__main__':
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
-    # Шаг 3: Запускаем веб-сервер и бота
     threading.Thread(target=run_health_check_server, daemon=True).start()
     
-    print("Бот запущен в финальной версии (v5.2 - Стабильный запуск)...")
+    print("Бот запущен в финальной версии (v5.3 - Стабильный запуск)...")
     application.run_polling()
