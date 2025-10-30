@@ -1,4 +1,4 @@
-# bot.py (ФИНАЛЬНАЯ ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ 3.1 - ИСПРАВЛЕННАЯ)
+# bot.py (ФИНАЛЬНАЯ ПРОФЕССИОНАЛЬНАЯ ВЕРСИЯ 4.0)
 
 import os
 import logging
@@ -23,6 +23,8 @@ from parser import process_excel_file
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+# ИЗМЕНЕНИЕ: Структура для хранения данных стала сложнее, чтобы поддерживать проверку дубликатов
+# user_data = { user_id: {'df': DataFrame, 'processed_files': {'file1.xlsx', 'file2.xlsx'}} }
 user_data = {}
 
 # --- Состояния для диалогов ---
@@ -50,7 +52,6 @@ def get_export_menu_keyboard():
         [InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='back_to_main_menu')],
     ])
 
-# ИСПРАВЛЕНИЕ: Добавляем недостающую клавиатуру
 post_upload_keyboard = InlineKeyboardMarkup([
     [InlineKeyboardButton("📊 Отчет по авто", callback_data='summary_car')],
     [InlineKeyboardButton("👤 Отчет по водителям", callback_data='summary_driver')],
@@ -63,10 +64,24 @@ back_to_main_menu_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️
 # --- Главное меню и навигация ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет главное меню."""
     user_id = update.effective_user.id
-    welcome_text = "👋 **Главное меню**\n\nВыберите действие:"
-    if user_id in user_data and not user_data[user_id].empty:
-        welcome_text += f"\n\nℹ️ Загружено записей: {len(user_data[user_id])}."
+    
+    # ИЗМЕНЕНИЕ: Добавляем описание и расширенную статистику
+    welcome_text = (
+        "👋 **Аналитический бот v4.0**\n\n"
+        "Этот бот предназначен для автоматического анализа отчетов о поездках. "
+        "Просто загрузите один или несколько Excel-файлов, и я соберу для вас всю статистику."
+    )
+    
+    if user_id in user_data and not user_data[user_id]['df'].empty:
+        df = user_data[user_id]['df']
+        welcome_text += (
+            f"\n\n**Текущая сессия:**\n"
+            f"▫️ Загружено файлов: {len(user_data[user_id]['processed_files'])}\n"
+            f"▫️ Всего записей: {len(df)}\n"
+            f"▫️ Общий доход: *{df['Стоимость'].sum():,.0f} руб.*"
+        )
     
     # Удаляем предыдущее сообщение, если это возможно, чтобы избежать дублирования меню
     if update.callback_query:
@@ -84,7 +99,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     command = query.data
 
-    has_data = user_id in user_data and not user_data[user_id].empty
+    # Проверяем, есть ли данные в сессии
+    df = user_data.get(user_id, {}).get('df')
+    has_data = df is not None and not df.empty
 
     # Навигация
     if command == 'back_to_main_menu':
@@ -98,8 +115,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Простое действие: Очистка данных
     if command == 'main_clear':
-        if has_data:
-            del user_data[user_id]
+        if user_id in user_data:
+            user_data[user_id] = {'df': pd.DataFrame(), 'processed_files': set()}
             await query.edit_message_text("🗑️ Все загруженные данные удалены.", reply_markup=back_to_main_menu_keyboard)
         else:
             await query.edit_message_text("ℹ️ У вас нет данных для очистки.", reply_markup=back_to_main_menu_keyboard)
@@ -112,17 +129,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Действия, требующие данных
     if command == 'main_stats':
-        df = user_data[user_id]
         message = (f"📊 *Общая статистика*\n\n"
-                   f"▫️ Обработано файлов: {df['Источник'].nunique()}\n"
+                   f"▫️ Обработано файлов: {len(user_data[user_id]['processed_files'])}\n"
                    f"▫️ Всего маршрутов: {len(df)}\n"
                    f"▫️ Общий заработок: *{df['Стоимость'].sum():,.2f} руб.*\n"
                    f"▫️ Уникальных машин: {df['Гос_номер'].nunique()}\n"
                    f"▫️ Уникальных водителей: {df['Водитель'].nunique()}")
         await query.edit_message_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
-
     elif command == 'main_top':
-        df = user_data[user_id]
         top_drivers = df.groupby('Водитель')['Стоимость'].sum().nlargest(5)
         top_drivers_text = "".join([f"{i}. {d} - {t:,.0f} руб.\n" for i, (d, t) in enumerate(top_drivers.items(), 1)])
         top_cars = df.groupby('Гос_номер')['Стоимость'].sum().nlargest(5)
@@ -131,13 +145,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                    f"👤 *Лучшие водители:*\n{top_drivers_text or 'Нет данных'}\n"
                    f"🚗 *Самые прибыльные машины:*\n{top_cars_text or 'Нет данных'}")
         await query.edit_message_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
-    
     elif command == 'export_full':
-        df = user_data[user_id]
         await send_excel_report(df, query.message.chat_id, context, "полный_отчет.xlsx")
-    
+        await context.bot.send_message(query.message.chat_id, "Выберите следующее действие:", reply_markup=back_to_main_menu_keyboard)
     elif command == 'summary_car' or command == 'summary_driver':
-        df = user_data[user_id]
         group_by_col = 'Гос_номер' if command == 'summary_car' else 'Водитель'
         title = "🚗 Сводка по автомобилям" if command == 'summary_car' else "👤 Сводка по водителям"
         summary = df.groupby(group_by_col)['Стоимость'].sum().sort_values(ascending=False)
@@ -169,57 +180,66 @@ async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_car_stats_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     user_id = update.effective_user.id
-    df = user_data.get(user_id, pd.DataFrame())
-    
+    df = user_data.get(user_id, {}).get('df', pd.DataFrame())
     car_df = df[df['Гос_номер'].astype(str).str.contains(user_input, case=False, na=False)]
+    
+    # ИЗМЕНЕНИЕ: Цикл повторного ввода
     if car_df.empty:
-        await update.message.reply_text(f"❌ Машина с номером '{user_input}' не найдена.", reply_markup=back_to_main_menu_keyboard)
-    else:
-        drivers = ", ".join(car_df['Водитель'].unique())
-        message = (f"🚗 *Статистика по машине {user_input}*\n\n"
-                   f"▫️ Совершено маршрутов: {len(car_df)}\n"
-                   f"▫️ Общий заработок: *{car_df['Стоимость'].sum():,.2f} руб.*\n"
-                   f"▫️ Водители: {drivers}")
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
+        await update.message.reply_text(f"❌ Машина с номером '{user_input}' не найдена. Попробуйте еще раз или нажмите 'Отмена'.", reply_markup=cancel_keyboard)
+        return ASK_CAR_STATS # Остаемся в том же состоянии
+        
+    drivers = ", ".join(car_df['Водитель'].unique())
+    message = (f"🚗 *Статистика по машине {user_input}*\n\n"
+               f"▫️ Совершено маршрутов: {len(car_df)}\n"
+               f"▫️ Общий заработок: *{car_df['Стоимость'].sum():,.2f} руб.*\n"
+               f"▫️ Водители: {drivers}")
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 
 async def handle_driver_stats_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     user_id = update.effective_user.id
-    df = user_data.get(user_id, pd.DataFrame())
-
+    df = user_data.get(user_id, {}).get('df', pd.DataFrame())
     driver_df = df[df['Водитель'].str.contains(user_input, case=False, na=False)]
+    
     if driver_df.empty:
-        await update.message.reply_text(f"❌ Водитель '{user_input}' не найден.", reply_markup=back_to_main_menu_keyboard)
-    else:
-        cars = ", ".join(driver_df['Гос_номер'].unique())
-        message = (f"👤 *Статистика по водителю {user_input}*\n\n"
-                   f"▫️ Совершено маршрутов: {len(driver_df)}\n"
-                   f"▫️ Общий заработок: *{driver_df['Стоимость'].sum():,.2f} руб.*\n"
-                   f"▫️ Машины: {cars}")
-        await update.message.reply_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
+        await update.message.reply_text(f"❌ Водитель '{user_input}' не найден. Попробуйте еще раз или нажмите 'Отмена'.", reply_markup=cancel_keyboard)
+        return ASK_DRIVER_STATS # Остаемся в том же состоянии
+
+    cars = ", ".join(driver_df['Гос_номер'].unique())
+    message = (f"👤 *Статистика по водителю {user_input}*\n\n"
+               f"▫️ Совершено маршрутов: {len(driver_df)}\n"
+               f"▫️ Общий заработок: *{driver_df['Стоимость'].sum():,.2f} руб.*\n"
+               f"▫️ Машины: {cars}")
+    await update.message.reply_text(message, parse_mode='Markdown', reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 
 async def handle_car_export_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     user_id = update.effective_user.id
-    df = user_data.get(user_id, pd.DataFrame())
+    df = user_data.get(user_id, {}).get('df', pd.DataFrame())
     car_df = df[df['Гос_номер'].astype(str).str.contains(user_input, case=False, na=False)]
+    
     if car_df.empty:
-        await update.message.reply_text(f"❌ Машина '{user_input}' не найдена. Экспорт отменен.", reply_markup=back_to_main_menu_keyboard)
-    else:
-        await send_excel_report(car_df, update.message.chat_id, context, f"отчет_машина_{user_input}.xlsx")
+        await update.message.reply_text(f"❌ Машина '{user_input}' не найдена. Попробуйте еще раз или отмените экспорт.", reply_markup=cancel_keyboard)
+        return ASK_CAR_EXPORT # Остаемся в том же состоянии
+        
+    await send_excel_report(car_df, update.message.chat_id, context, f"отчет_машина_{user_input}.xlsx")
+    await update.message.reply_text("Выберите следующее действие:", reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 
 async def handle_driver_export_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_input = update.message.text
     user_id = update.effective_user.id
-    df = user_data.get(user_id, pd.DataFrame())
+    df = user_data.get(user_id, {}).get('df', pd.DataFrame())
     driver_df = df[df['Водитель'].str.contains(user_input, case=False, na=False)]
+
     if driver_df.empty:
-        await update.message.reply_text(f"❌ Водитель '{user_input}' не найден. Экспорт отменен.", reply_markup=back_to_main_menu_keyboard)
-    else:
-        await send_excel_report(driver_df, update.message.chat_id, context, f"отчет_водитель_{user_input}.xlsx")
+        await update.message.reply_text(f"❌ Водитель '{user_input}' не найден. Попробуйте еще раз или отмените экспорт.", reply_markup=cancel_keyboard)
+        return ASK_DRIVER_EXPORT # Остаемся в том же состоянии
+        
+    await send_excel_report(driver_df, update.message.chat_id, context, f"отчет_водитель_{user_input}.xlsx")
+    await update.message.reply_text("Выберите следующее действие:", reply_markup=back_to_main_menu_keyboard)
     return ConversationHandler.END
 
 async def send_excel_report(df: pd.DataFrame, chat_id: int, context: ContextTypes.DEFAULT_TYPE, filename: str):
@@ -228,7 +248,7 @@ async def send_excel_report(df: pd.DataFrame, chat_id: int, context: ContextType
         df.to_excel(writer, index=False, sheet_name='Отчет')
         worksheet = writer.sheets['Отчет']
         for idx, col in enumerate(df):
-            max_len = max(df[col].astype(str).map(len).max(), len(str(df[col].name))) + 1
+            max_len = max((df[col].astype(str).map(len).max(), len(str(df[col].name)) + 1))
             worksheet.set_column(idx, idx, max_len)
     output.seek(0)
     await context.bot.send_document(chat_id=chat_id, document=output, filename=filename, caption='📊 Ваш отчет готов.')
@@ -243,21 +263,30 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     file = await update.message.document.get_file()
     file_name = update.message.document.file_name
-    if not file_name.lower().endswith('.xlsx'):
-        await update.message.reply_text("❌ Пожалуйста, отправьте файл в формате .xlsx")
+
+    # Инициализируем данные пользователя, если их еще нет
+    if user_id not in user_data:
+        user_data[user_id] = {'df': pd.DataFrame(), 'processed_files': set()}
+    
+    # ИЗМЕНЕНИЕ: Проверка на дубликаты
+    if file_name in user_data[user_id]['processed_files']:
+        await update.message.reply_text(f"⚠️ Файл '{file_name}' уже был загружен ранее. Загрузка пропущена.")
         return
+
     await update.message.reply_text(f"⏳ Получил файл '{file_name}'. Обрабатываю...")
     file_content = await file.download_as_bytearray()
     new_df = process_excel_file(bytes(file_content), file_name)
+    
     if new_df is None or new_df.empty:
         await update.message.reply_text(f"⚠️ Не удалось извлечь данные из файла '{file_name}'.")
         return
-    if user_id in user_data: user_data[user_id] = pd.concat([user_data[user_id], new_df], ignore_index=True)
-    else: user_data[user_id] = new_df
+    
+    user_data[user_id]['df'] = pd.concat([user_data[user_id]['df'], new_df], ignore_index=True)
+    user_data[user_id]['processed_files'].add(file_name)
     
     message_text = (f"✅ Файл '{file_name}' успешно обработан!\n"
                     f"Добавлено записей: {len(new_df)}\n"
-                    f"Всего загружено: {len(user_data[user_id])}\n\n"
+                    f"Всего загружено: {len(user_data[user_id]['df'])}\n\n"
                     "Что вы хотите сделать дальше?")
     await update.message.reply_text(message_text, reply_markup=post_upload_keyboard)
 
@@ -299,5 +328,5 @@ if __name__ == '__main__':
     
     threading.Thread(target=run_health_check_server, daemon=True).start()
     
-    print("Бот запущен в финальной профессиональной версии (v3.1)...")
+    print("Бот запущен в финальной профессиональной версии (v4.0)...")
     application.run_polling()
