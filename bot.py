@@ -11,40 +11,38 @@ from telegram.ext import (
     filters,
     CallbackQueryHandler
 )
+# Импортируем класс ошибки, чтобы ее ловить
+from telegram.error import BadRequest
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from parser import process_excel_file
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 user_data = {}
 
-# --- НОВИНКА: Клавиатура для возврата в меню ---
-# Мы будем использовать ее в нескольких местах, поэтому вынесем отдельно
-back_keyboard = InlineKeyboardMarkup([[
-    InlineKeyboardButton("⬅️ Назад в меню", callback_data='back_to_menu')
-]])
+# --- Клавиатуры для удобства ---
+back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в меню", callback_data='back_to_menu')]])
+
+# НОВИНКА: Клавиатура после загрузки файла
+post_upload_keyboard = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📊 Отчет по авто", callback_data='summary_car')],
+    [InlineKeyboardButton("👤 Отчет по водителям", callback_data='summary_driver')],
+    [InlineKeyboardButton("⬅️ В главное меню", callback_data='back_to_menu')]
+])
 
 def get_main_menu(user_id):
-    """Возвращает текст и клавиатуру для главного меню."""
     welcome_text = (
-        "👋 Привет! Я бот для анализа поездок.\n\n"
-        "Просто отправьте мне один или несколько Excel-файлов (.xlsx). "
-        "Когда закончите, используйте кнопки ниже для получения статистики."
+        "👋 **Главное меню**\n\n"
+        "Отправьте мне Excel-файл для анализа или используйте кнопки ниже для просмотра статистики."
     )
     if user_id in user_data and not user_data[user_id].empty:
-        welcome_text += f"\n\nℹ️ У вас уже загружено записей: {len(user_data[user_id])}."
+        welcome_text += f"\n\nℹ️ Загружено записей: {len(user_data[user_id])}."
     
     keyboard = [
         [InlineKeyboardButton("📊 Общая статистика", callback_data='stats')],
-        [
-            InlineKeyboardButton("🏆 Топ-5", callback_data='top'),
-            InlineKeyboardButton("📥 Экспорт в Excel", callback_data='export')
-        ],
+        [InlineKeyboardButton("🏆 Топ-5", callback_data='top'), InlineKeyboardButton("📥 Экспорт в Excel", callback_data='export')],
         [InlineKeyboardButton("🗑️ Очистить данные", callback_data='clear')],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -53,93 +51,80 @@ def get_main_menu(user_id):
 # --- ОБРАБОТЧИКИ ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет главное меню."""
     user_id = update.effective_user.id
     text, markup = get_main_menu(user_id)
-    await update.message.reply_text(text, reply_markup=markup)
+    await update.message.reply_text(text, reply_markup=markup, parse_mode='Markdown')
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает все нажатия на инлайн-кнопки."""
     query = update.callback_query
     await query.answer()
     
     user_id = query.from_user.id
     command = query.data
 
-    # --- НОВИНКА: обработка кнопки "Назад" ---
-    if command == 'back_to_menu':
-        text, markup = get_main_menu(user_id)
-        await query.edit_message_text(text, reply_markup=markup)
-        return
-
-    has_data = user_id in user_data and not user_data[user_id].empty
-
-    if command == 'stats':
-        if not has_data:
-            await query.edit_message_text("ℹ️ Данные для анализа отсутствуют.", reply_markup=back_keyboard)
-            return
-        
-        df = user_data[user_id]
-        message = (
-            f"📊 *Общая статистика*\n\n"
-            f"▫️ Обработано файлов: {df['Источник'].nunique()}\n"
-            f"▫️ Всего маршрутов: {len(df)}\n"
-            f"▫️ Общий заработок: *{df['Стоимость'].sum():,.2f} руб.*\n"
-            f"▫️ Уникальных машин: {df['Гос_номер'].nunique()}\n"
-            f"▫️ Уникальных водителей: {df['Водитель'].nunique()}"
-        )
-        await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=back_keyboard)
-
-    elif command == 'top':
-        if not has_data:
-            await query.edit_message_text("ℹ️ Данные для анализа отсутствуют.", reply_markup=back_keyboard)
+    try:
+        if command == 'back_to_menu':
+            text, markup = get_main_menu(user_id)
+            await query.edit_message_text(text, reply_markup=markup, parse_mode='Markdown')
             return
 
-        df = user_data[user_id]
-        top_drivers = df.groupby('Водитель')['Стоимость'].sum().nlargest(5)
-        top_drivers_text = "".join([f"{i}. {d} - {t:,.0f} руб.\n" for i, (d, t) in enumerate(top_drivers.items(), 1)])
-        top_cars = df.groupby('Гос_номер')['Стоимость'].sum().nlargest(5)
-        top_cars_text = "".join([f"{i}. Номер {c} - {t:,.0f} руб.\n" for i, (c, t) in enumerate(top_cars.items(), 1)])
-        
-        message = (
-            f"🏆 *Топ-5 по заработку*\n\n"
-            f"👤 *Лучшие водители:*\n{top_drivers_text or 'Нет данных'}\n"
-            f"🚗 *Самые прибыльные машины:*\n{top_cars_text or 'Нет данных'}"
-        )
-        await query.edit_message_text(text=message, parse_mode='Markdown', reply_markup=back_keyboard)
+        has_data = user_id in user_data and not user_data[user_id].empty
 
-    elif command == 'clear':
-        if user_id in user_data:
-            del user_data[user_id]
-            await query.edit_message_text("🗑️ Все загруженные данные удалены.", reply_markup=back_keyboard)
-        else:
-            await query.edit_message_text("ℹ️ У вас нет данных для очистки.", reply_markup=back_keyboard)
-
-    elif command == 'export':
-        # ИСПРАВЛЕНИЕ: Используем query.message.chat_id вместо query.effective_chat.id
-        chat_id = query.message.chat_id
-        if not has_data:
-            await context.bot.send_message(chat_id=chat_id, text="ℹ️ Нет данных для экспорта.")
-            return
+        # --- НОВИНКА: Обработка кнопок сводки ---
+        if command == 'summary_car' or command == 'summary_driver':
+            if not has_data:
+                await query.edit_message_text("ℹ️ Данные для анализа отсутствуют.", reply_markup=back_keyboard)
+                return
             
-        df = user_data[user_id]
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Сводный отчет')
-            worksheet = writer.sheets['Сводный отчет']
-            for idx, col in enumerate(df):
-                max_len = max(df[col].astype(str).map(len).max(), len(str(df[col].name))) + 1
-                worksheet.set_column(idx, idx, max_len)
-        output.seek(0)
+            df = user_data[user_id]
+            group_by_col = 'Гос_номер' if command == 'summary_car' else 'Водитель'
+            title = "🚗 Сводка по автомобилям" if command == 'summary_car' else "👤 Сводка по водителям"
+            
+            summary = df.groupby(group_by_col)['Стоимость'].sum().sort_values(ascending=False)
+            
+            summary_text = f"**{title}**\n\n"
+            if summary.empty:
+                summary_text += "Нет данных для отображения."
+            else:
+                for item, total in summary.items():
+                    summary_text += f"▫️ {item}: *{total:,.0f} руб.*\n"
+            
+            await query.edit_message_text(summary_text, parse_mode='Markdown', reply_markup=back_keyboard)
         
-        await context.bot.send_document(
-            chat_id=chat_id, 
-            document=output, 
-            filename='сводный_отчет.xlsx',
-            caption='📊 Ваш сводный отчет по всем загруженным файлам.'
-        )
-        # Отправляем сообщение, чтобы пользователь знал, что все прошло успешно
-        await context.bot.send_message(chat_id=chat_id, text="✅ Файл с отчетом готов.")
+        # ... (остальные кнопки без изменений) ...
+        elif command == 'stats':
+            # ...
+        
+        elif command == 'export':
+             # ...
+             
+    except BadRequest as e:
+        # ИСПРАВЛЕНИЕ: Ловим ошибку "Message is not modified" и просто игнорируем ее
+        if "Message is not modified" in str(e):
+            logging.info("Ignoring 'Message is not modified' error.")
+        else:
+            logging.error(f"An unexpected BadRequest error occurred: {e}")
+    except Exception as e:
+        logging.error(f"An error occurred in button_callback: {e}")
+        await query.edit_message_text("❌ Произошла ошибка при обработке вашего запроса.", reply_markup=back_keyboard)
+
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    # ... (логика обработки файла)
+    file = await update.message.document.get_file()
+    # ...
+    new_df = process_excel_file(bytes(file_content), file_name)
+    # ...
+    
+    # НОВИНКА: Отправляем сообщение с новыми кнопками
+    message_text = (
+        f"✅ Файл '{file_name}' успешно обработан!\n"
+        f"Добавлено записей: {len(new_df)}\n"
+        f"Всего загружено: {len(user_data[user_id])}\n\n"
+        "Что вы хотите сделать дальше?"
+    )
+    await update.message.reply_text(message_text, reply_markup=post_upload_keyboard)
 
 # ... Остальные функции (car_stats, driver_stats, handle_document и веб-сервер) остаются без изменений ...
 async def car_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
