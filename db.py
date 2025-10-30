@@ -1,4 +1,4 @@
-# db.py (Версия 6.1 - ИСПРАВЛЕННАЯ)
+# db.py (Версия 6.2 - ФИНАЛЬНЫЙ ИСПРАВЛЕННЫЙ)
 
 import os
 import logging
@@ -16,32 +16,9 @@ async def init_db():
     try:
         pool = await asyncpg.create_pool(dsn=os.getenv("DATABASE_URL"))
         async with pool.acquire() as conn:
-            # Таблица пользователей
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id BIGINT PRIMARY KEY,
-                    first_name TEXT,
-                    last_name TEXT,
-                    username TEXT,
-                    first_seen TIMESTAMPTZ DEFAULT NOW(),
-                    last_seen TIMESTAMPTZ DEFAULT NOW()
-                );
-            """)
-            # Справочник машин
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS cars (
-                    car_id SERIAL PRIMARY KEY,
-                    plate_number TEXT NOT NULL UNIQUE
-                );
-            """)
-            # Справочник водителей
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS drivers (
-                    driver_id SERIAL PRIMARY KEY,
-                    name TEXT NOT NULL UNIQUE
-                );
-            """)
-            # Таблица фактов о поездках
+            await conn.execute("CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, first_name TEXT, last_name TEXT, username TEXT, first_seen TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW());")
+            await conn.execute("CREATE TABLE IF NOT EXISTS cars (car_id SERIAL PRIMARY KEY, plate_number TEXT NOT NULL UNIQUE);")
+            await conn.execute("CREATE TABLE IF NOT EXISTS drivers (driver_id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE);")
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS trips (
                     trip_id SERIAL PRIMARY KEY,
@@ -61,7 +38,6 @@ async def init_db():
         pool = None
         return False
 
-# --- ВОТ ОНА, НЕДОСТАЮЩАЯ ФУНКЦИЯ ---
 async def get_or_create_user(update: Update):
     """Обновляет или создает пользователя в БД при каждом его действии."""
     user = update.effective_user
@@ -79,11 +55,11 @@ async def get_or_create_user(update: Update):
 
 async def get_or_create_id(conn, table_name, column_name, value):
     """Универсальная функция для получения ID из справочника."""
-    id_column = f"{table_name[:-1]}_id" # cars -> car_id
-    record_id = await conn.fetchval(f"SELECT {id_column} FROM {table_name} WHERE {column_name} = $1", value)
+    id_column = f"{table_name[:-1]}_id"
+    record_id = await conn.fetchval(f'SELECT {id_column} FROM {table_name} WHERE {column_name} = $1', value)
     if record_id:
         return record_id
-    return await conn.fetchval(f"INSERT INTO {table_name} ({column_name}) VALUES ($1) RETURNING {id_column}", value)
+    return await conn.fetchval(f'INSERT INTO {table_name} ({column_name}) VALUES ($1) RETURNING {id_column}', value)
 
 async def add_trips_from_df(user_id: int, df: pd.DataFrame):
     """Добавляет поездки, получая ID из справочников."""
@@ -117,15 +93,18 @@ async def get_all_trips_as_df(user_id: int) -> pd.DataFrame:
             t.amount AS "Стоимость",
             c.plate_number AS "Гос_номер",
             d.name AS "Водитель"
-        FROM trips t
-        LEFT JOIN cars c ON t.car_id = c.car_id
-        LEFT JOIN drivers d ON t.driver_id = d.driver_id
+        FROM trips AS t
+        LEFT JOIN cars AS c ON t.car_id = c.car_id
+        LEFT JOIN drivers AS d ON t.driver_id = d.driver_id
         WHERE t.user_id = $1
         ORDER BY t.trip_date, t.trip_id;
     """
     async with pool.acquire() as conn:
         records = await conn.fetch(query, user_id)
-        return pd.DataFrame(records, [desc.name for desc in records[0].keys()]) if records else pd.DataFrame()
+        if not records:
+            return pd.DataFrame()
+        # Создаем DataFrame из записей, используя ключи как имена колонок
+        return pd.DataFrame(records, columns=records[0].keys())
 
 async def get_processed_files(user_id: int) -> set:
     """Получает множество имен уже обработанных файлов."""
