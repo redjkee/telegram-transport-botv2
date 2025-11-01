@@ -298,8 +298,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Всего загружено: {len(full_df)}\n\n"
                     "Что вы хотите сделать дальше?")
     await update.message.reply_text(message_text, reply_markup=post_upload_keyboard)
-class HealthCheckHandler(BaseHTTPRequestHandler): # ... (логика без изменений из v6.0)
-def run_health_check_server(): # ... (логика без изменений из v6.0)
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot is alive")
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+def run_health_check_server():
+    port = int(os.environ.get("PORT", 8080))
+    server_address = ('', port)
+    httpd = HTTPServer(server_address, HealthCheckHandler)
+    httpd.serve_forever()
 
 if __name__ == '__main__':
     TOKEN = os.getenv('TELEGRAM_TOKEN')
