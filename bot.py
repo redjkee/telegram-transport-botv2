@@ -39,13 +39,30 @@ RUSSIAN_MONTHS = {
     7: "июль", 8: "август", 9: "сентябрь", 10: "октябрь", 11: "ноябрь", 12: "декабрь"
 }
 
-# --- Клавиатуры (без изменений) ---
-# ... (все клавиатуры из предыдущей версии) ...
-def get_main_menu_keyboard(): #...
-def get_export_menu_keyboard(): #...
-post_upload_keyboard = InlineKeyboardMarkup(...)
-cancel_keyboard = InlineKeyboardMarkup(...)
-back_to_main_menu_keyboard = InlineKeyboardMarkup(...)
+# --- Клавиатуры ---
+def get_main_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Общая статистика", callback_data='main_stats')],
+        [InlineKeyboardButton("🚗 Статистика по гос. номеру", callback_data='main_ask_car_stats')],
+        [InlineKeyboardButton("👤 Статистика по фамилии", callback_data='main_ask_driver_stats')],
+        [InlineKeyboardButton("📥 Экспорт в Excel", callback_data='main_export_menu')],
+        [InlineKeyboardButton("🏆 Топ-5", callback_data='main_top')],
+        [InlineKeyboardButton("🗑️ Очистить данные", callback_data='main_clear')],
+    ])
+def get_export_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Полный отчет", callback_data='export_full')],
+        [InlineKeyboardButton("🚗 По гос. номеру (кастомный)", callback_data='export_ask_car')],
+        [InlineKeyboardButton("👤 По фамилии", callback_data='export_ask_driver')],
+        [InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='back_to_main_menu')],
+    ])
+post_upload_keyboard = InlineKeyboardMarkup([
+    [InlineKeyboardButton("📊 Отчет по авто", callback_data='summary_car')],
+    [InlineKeyboardButton("👤 Отчет по водителям", callback_data='summary_driver')],
+    [InlineKeyboardButton("⬅️ В главное меню", callback_data='back_to_main_menu')]
+])
+cancel_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data='cancel_conversation')]])
+back_to_main_menu_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад в главное меню", callback_data='back_to_main_menu')]])
 
 # --- ИНИЦИАЛИЗАЦИЯ БД ---
 async def post_init(application: Application):
